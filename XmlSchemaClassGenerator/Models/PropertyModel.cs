@@ -1,9 +1,10 @@
-﻿using System;
+using System;
 using System.CodeDom;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Xml;
 using System.Xml.Schema;
 using System.Xml.Serialization;
@@ -76,6 +77,41 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
                         : xs.QualifiedName.Namespace;
     }
 
+    /// <summary>
+    /// Cached reflection accessor for <see cref="CodeTypeReference"/>'s private <c>_baseType</c> field.
+    /// Used by <see cref="CreateLiteralTypeRef"/> to bypass CodeDom's type name parsing.
+    /// </summary>
+    private static readonly FieldInfo BaseTypeField =
+        typeof(CodeTypeReference).GetField("_baseType", BindingFlags.NonPublic | BindingFlags.Instance)
+        ?? throw new InvalidOperationException("Could not find CodeTypeReference._baseType field via reflection.");
+
+    /// <summary>
+    /// Creates a <see cref="CodeTypeReference"/> that renders as the given literal string,
+    /// bypassing CodeDom's type name parsing. This is necessary for types that include
+    /// syntax CodeDom cannot represent (e.g. <c>List&lt;string&gt;?</c>, <c>byte[]?</c>,
+    /// or <c>required string</c>), because CodeDom's constructor splits on <c>&lt;</c>,
+    /// <c>&gt;</c>, <c>[</c>, and <c>]</c>, losing any trailing <c>?</c> suffix or
+    /// unrecognised prefix.
+    /// </summary>
+    internal static CodeTypeReference CreateLiteralTypeRef(string literalTypeName)
+    {
+        var typeRef = new CodeTypeReference();
+        BaseTypeField.SetValue(typeRef, literalTypeName);
+        return typeRef;
+    }
+
+    /// <summary>
+    /// Renders a <see cref="CodeTypeReference"/> to its C# source representation
+    /// (resolving aliases and generic arguments), then wraps the result with an
+    /// optional <paramref name="prefix"/> and/or <paramref name="suffix"/> into
+    /// a literal <see cref="CodeTypeReference"/> that CodeDom outputs verbatim.
+    /// </summary>
+    internal static CodeTypeReference WrapTypeRef(CodeTypeReference source, string prefix = "", string suffix = "")
+    {
+        var rendered = TypeModel.GetCSharpTypeOutput(source);
+        return CreateLiteralTypeRef(prefix + rendered + suffix);
+    }
+
     internal static string GetAccessors(CodeMemberField backingField = null, bool withDataBinding = false, PropertyValueTypeCode typeCode = PropertyValueTypeCode.Other, string setter = "set")
     {
         return backingField == null ? " { get; set; }" : CodeUtilities.NormalizeNewlines($@"
@@ -132,7 +168,20 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
     private bool IsNullableValueType => IsNullable && !IsEnumerable && IsValueType;
 
-    private bool IsNullableReferenceType => IsNullable && (!IsEnumerable || !IsPrivateSetter) && (PropertyType is ClassModel || (PropertyType is SimpleModel model && !model.ValueType.IsValueType));
+    // A reference type is nullable when:
+    // - the property is optional (IsNullable covers no-default + not-required), OR
+    // - the property has a default value but is still optional (!IsRequired),
+    //   because a reference type with a default can still legitimately be null (element absent from XML).
+    //   IsNullable excludes defaults because value types use the Specified pattern instead of Nullable<T>,
+    //   but that reasoning doesn't apply to reference types which are inherently nullable.
+    //
+    // This applies to both the EnableNullableDirective ('?' syntax) and
+    // EnableNullableReferenceAttributes ([AllowNull]/[MaybeNull]) paths —
+    // both consumers guard on their respective configuration flags.
+    private bool IsNullableReferenceType =>
+        (IsNullable || (DefaultValue != null && !IsRequired))
+        && (!IsEnumerable || !IsPrivateSetter)
+        && (PropertyType is ClassModel || (PropertyType is SimpleModel model && !model.ValueType.IsValueType));
 
     private bool IsNillableValueType => IsNillable && !IsEnumerable && IsValueType;
 
@@ -180,6 +229,15 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
         if ((isNullableValueType || IsNillableValueType) && Configuration.GenerateNullables)
             typeReference = NullableTypeRef(typeReference);
+
+        // Apply nullable reference type syntax on interface members to match
+        // the implementing class (which uses '?' when EnableNullableDirective is on).
+        // WrapTypeRef renders via CSharpCodeProvider then creates a literal CodeTypeReference,
+        // so it works for all types including generics (List<string>?) and arrays (byte[]?).
+        if (IsNullableReferenceType && Configuration.EnableNullableDirective)
+        {
+            typeReference = WrapTypeRef(typeReference, suffix: "?");
+        }
 
         member = new CodeMemberProperty
         {
@@ -279,12 +337,24 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
                 member.CustomAttributes.Add(CreateDefaultValueAttribute(typeReference, defaultValueExpression));
         }
 
+        // Emit the C# 11 'required' modifier for required properties.
+        // CodeDom renders a CodeMemberField as: <access> <type> <name>;
+        // By prepending "required " to the type name we get: public required <type> <name> { get; set; }
+        if (IsRequired && !IsEnumerable && Configuration.GenerateRequiredModifier)
+        {
+            // Clone the type reference so we don't also modify the backing field's type
+            // (member.Type may be the same object as backingField.Type when both point to typeReference).
+            member.Type = WrapTypeRef(member.Type, prefix: "required ");
+        }
+
         member.Attributes = MemberAttributes.Public;
         typeDeclaration.Members.Add(member);
 
         AddDocs(member);
 
-        if (IsRequired && Configuration.DataAnnotationMode != DataAnnotationMode.None)
+        // Emit [Required] for DataAnnotations validation unless the C# 11 'required'
+        // modifier is active, which provides strictly stronger compile-time enforcement.
+        if (IsRequired && Configuration.DataAnnotationMode != DataAnnotationMode.None && !Configuration.GenerateRequiredModifier)
         {
             var requiredAttribute = new CodeAttributeDeclaration(CodeUtilities.CreateTypeReference(Attributes.Required, Configuration));
             var noEmptyStrings = propertyType is SimpleModel simpleModel
@@ -462,14 +532,142 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
             }
         }
 
-        if (IsNullableReferenceType && Configuration.EnableNullableReferenceAttributes)
+        if (IsNullableReferenceType)
         {
-            member.CustomAttributes.Add(new CodeAttributeDeclaration(CodeUtilities.CreateTypeReference(Attributes.AllowNull, Configuration)));
-            member.CustomAttributes.Add(new CodeAttributeDeclaration(CodeUtilities.CreateTypeReference(Attributes.MaybeNull, Configuration)));
+            if (Configuration.EnableNullableDirective)
+            {
+                // Use native nullable reference type syntax: append ? to the type name.
+                // WrapTypeRef renders via CSharpCodeProvider then creates a literal CodeTypeReference,
+                // so it works for ALL types including generics (List<string>?) and arrays (byte[]?).
+                member.Type = WrapTypeRef(member.Type, suffix: "?");
+
+                // Also make the backing field nullable so the setter assignment is null-safe.
+                if (backingField != null)
+                {
+                    backingField.Type = WrapTypeRef(backingField.Type, suffix: "?");
+                }
+            }
+            else if (Configuration.EnableNullableReferenceAttributes)
+            {
+                member.CustomAttributes.Add(new CodeAttributeDeclaration(CodeUtilities.CreateTypeReference(Attributes.AllowNull, Configuration)));
+                member.CustomAttributes.Add(new CodeAttributeDeclaration(CodeUtilities.CreateTypeReference(Attributes.MaybeNull, Configuration)));
+            }
         }
 
         var attributes = GetAttributes(isArray).ToArray();
-        member.CustomAttributes.AddRange(attributes);
+
+        // For xsd:list element properties with EnumCollection, XmlSerializer cannot natively
+        // serialize a collection as a single element with space-separated values. It would emit
+        // one <Element> per item instead. Fix: make the typed collection [XmlIgnore] and add a
+        // string proxy property with the [XmlElement] attribute that converts between the typed
+        // collection and the space-separated string using the [XmlEnum] attribute names.
+        var enumListItemType = IsList && !IsAttribute && Configuration.EnumCollection && propertyType is SimpleModel listSimpleModel
+            ? listSimpleModel.EnumListItemType : null;
+
+        if (enumListItemType != null)
+        {
+            // The typed collection member becomes [XmlIgnore] — it's the programmatic API.
+            member.CustomAttributes.Add(ignoreAttribute);
+
+            // The proxy setter always assigns null to the backing field when the input is
+            // null/empty. Under #nullable enable both the backing field and the public
+            // collection property must be nullable, even when IsNullableReferenceType is
+            // false (e.g. required enum-list properties), because the getter returns the
+            // backing field directly and the setter nulls it out.
+            if (Configuration.EnableNullableDirective && backingField != null
+                && !backingField.Type.BaseType.TrimEnd().EndsWith("?"))
+            {
+                backingField.Type = WrapTypeRef(backingField.Type, suffix: "?");
+                member.Type = WrapTypeRef(member.Type, suffix: "?");
+            }
+
+            // Get the enum type name and values for the proxy accessor code.
+            var enumTypeRef = enumListItemType.GetReferenceFor(OwningType.Namespace);
+            var enumTypeName = TypeModel.GetCSharpTypeOutput(enumTypeRef);
+            var enumValues = ((EnumModel)enumListItemType).Values;
+
+            var backingFieldName = backingField != null ? backingField.Name : $"this.{Name}";
+            var collectionType = Configuration.CollectionImplementationType ?? Configuration.CollectionType;
+            var isArrayCollection = collectionType == typeof(Array);
+            var countMember = isArrayCollection ? "Length" : "Count";
+
+            // Build switch arms: enum member → XML name, and XML name → enum member.
+            var toStringArms = string.Join("\n                    ",
+                enumValues.Select(v => $@"{enumTypeName}.{v.Name} => ""{v.Value}"","));
+            var fromStringArms = string.Join("\n                    ",
+                enumValues.Select(v => $@"""{v.Value}"" => {enumTypeName}.{v.Name},"));
+
+            // Getter: convert each enum value to its XML name via a switch expression
+            // and join them with spaces.
+            var getterCode = $@"
+                if ({backingFieldName} == null || {backingFieldName}.{countMember} == 0) return null;
+                return string.Join("" "", System.Linq.Enumerable.Select({backingFieldName}, item => item switch
+                {{
+                    {toStringArms}
+                    _ => item.ToString()
+                }}));";
+
+            // Setter: split space-separated XML names and convert each to an enum value
+            // via a switch expression, then assign directly to the backing field.
+            var collectionImplName = SimpleModel.GetCollectionImplementationName(enumTypeName, Configuration);
+
+            // Build the assignment that materializes the parsed enumerable into the
+            // configured collection type. List<T> and HashSet<T> accept IEnumerable<T>
+            // directly, but Collection<T> requires IList<T>, so we materialize through
+            // a List<T> intermediate for that case.
+            var collectionImplType = collectionType.IsGenericType ? collectionType.GetGenericTypeDefinition() : collectionType;
+            var listIntermediate = $"new System.Collections.Generic.List<{enumTypeName}>(parsed)";
+
+            string setterAssignment;
+            if (isArrayCollection)
+                setterAssignment = $"{backingFieldName} = System.Linq.Enumerable.ToArray(parsed);";
+            else if (collectionImplType == typeof(List<>))
+                setterAssignment = $"{backingFieldName} = {listIntermediate};";
+            else
+                setterAssignment = $"{backingFieldName} = new {collectionImplName}({listIntermediate});";
+
+            var setterCode = $@"
+                if (string.IsNullOrEmpty(value)) {{ {backingFieldName} = null; return; }}
+                var parsed = System.Linq.Enumerable.Select(value.Split(' '), part => part switch
+                {{
+                    {fromStringArms}
+                    _ => throw new System.ArgumentException($""Unknown value '{{part}}' for {enumTypeName}"")
+                }});
+                {setterAssignment}";
+
+            var proxyAccessors = CodeUtilities.NormalizeNewlines($@"
+        {{
+            get
+            {{{getterCode}
+            }}
+            set
+            {{{setterCode}
+            }}
+        }}");
+
+            // Use string? when #nullable enable is active since the getter returns null for empty collections.
+            CodeTypeReference proxyTypeRef = Configuration.EnableNullableDirective
+                ? CreateLiteralTypeRef("string?")
+                : new CodeTypeReference(typeof(string));
+
+            var proxyMember = new CodeMemberField(proxyTypeRef, Name + "Xml" + proxyAccessors)
+            {
+                Attributes = MemberAttributes.Public
+            };
+            proxyMember.CustomAttributes.AddRange(attributes);
+
+            // Hide the proxy from IntelliSense
+            var editorBrowsableAttr = AttributeDecl<EditorBrowsableAttribute>();
+            editorBrowsableAttr.Arguments.Add(new(new CodeFieldReferenceExpression(TypeRefExpr<EditorBrowsableState>(), nameof(EditorBrowsableState.Never))));
+            proxyMember.CustomAttributes.Add(editorBrowsableAttr);
+
+            typeDeclaration.Members.Add(proxyMember);
+            Configuration.MemberVisitor(proxyMember, this);
+        }
+        else
+        {
+            member.CustomAttributes.AddRange(attributes);
+        }
 
         // initialize List<>
         if (isEnumerable && (Configuration.CollectionSettersMode != CollectionSettersMode.PublicWithoutConstructorInitialization)

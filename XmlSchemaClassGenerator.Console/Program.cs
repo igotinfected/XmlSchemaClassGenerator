@@ -59,6 +59,8 @@ static class Program
         var createGeneratedCodeAttributeVersion = true;
         var netCoreSpecificCode = false;
         var nullableReferenceAttributes = false;
+        var enableNullableDirective = false;
+        var generateRequiredModifier = false;
         var generateCommandLineArgs = true;
         var useArrayItemAttribute = true;
         var enumAsString = false;
@@ -164,6 +166,8 @@ with or without backing field initialization for collections
             { "gc|generatedCodeAttribute", "add version information to GeneratedCodeAttribute (default is true)", v => createGeneratedCodeAttributeVersion = v != null },
             { "nc|netCore", "generate .NET Core specific code that might not work with .NET Framework (default is false)", v => netCoreSpecificCode = v != null },
             { "nr|nullableReferenceAttributes", "generate attributes for nullable reference types (default is false)", v => nullableReferenceAttributes = v != null },
+            { "nd|nullableDirective", "emit #nullable enable and use native nullable reference type syntax (default is false)", v => enableNullableDirective = v != null },
+            { "rm|requiredModifier", "emit C# 11 required modifier on required properties (default is false)", v => generateRequiredModifier = v != null },
             { "ar|useArrayItemAttribute", "use ArrayItemAttribute for sequences with single elements (default is true)", v => useArrayItemAttribute = v != null },
             { "es|enumAsString", "Use string instead of enum for enumeration", v => enumAsString = v != null },
             { "dmb|disableMergeRestrictionsWithBase", "Disable merging of simple type restrictions with base type restrictions", v => disableMergeRestrictionsWithBase = v != null },
@@ -266,6 +270,8 @@ with or without backing field initialization for collections
             CreateGeneratedCodeAttributeVersion = createGeneratedCodeAttributeVersion,
             NetCoreSpecificCode = netCoreSpecificCode,
             EnableNullableReferenceAttributes = nullableReferenceAttributes,
+            EnableNullableDirective = enableNullableDirective,
+            GenerateRequiredModifier = generateRequiredModifier,
             GenerateCommandLineArgumentsComment = generateCommandLineArgs,
             UseArrayItemAttribute = useArrayItemAttribute,
             EnumAsString = enumAsString,

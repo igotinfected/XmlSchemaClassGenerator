@@ -376,4 +376,21 @@ public class GeneratorConfiguration
     /// instead of falling back to string collections. Default is false.
     /// </summary>
     public bool EnumCollection { get; set; }
+
+    /// <summary>
+    /// Emit <c>#nullable enable</c> at the top of each generated file
+    /// and use native nullable reference type syntax (<c>string?</c>) instead of
+    /// <c>[AllowNull]</c>/<c>[MaybeNull]</c> attributes. Default is false.
+    /// </summary>
+    public bool EnableNullableDirective { get; set; }
+
+    /// <summary>
+    /// Emit the C# 11 <c>required</c> modifier on properties that correspond to
+    /// required XSD elements (<c>minOccurs &gt;= 1</c>) or attributes (<c>use="required"</c>).
+    /// When enabled, the <c>[Required]</c> data annotation attribute is no longer emitted
+    /// as the <c>required</c> keyword provides strictly stronger compile-time enforcement.
+    /// Recommended to use together with <see cref="EnableNullableDirective"/> for
+    /// the strongest compile-time safety. Default is false.
+    /// </summary>
+    public bool GenerateRequiredModifier { get; set; }
 }

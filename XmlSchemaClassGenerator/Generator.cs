@@ -378,6 +378,18 @@ public class Generator
         set { _configuration.EnumCollection = value; }
     }
 
+    public bool EnableNullableDirective
+    {
+        get { return _configuration.EnableNullableDirective; }
+        set { _configuration.EnableNullableDirective = value; }
+    }
+
+    public bool GenerateRequiredModifier
+    {
+        get { return _configuration.GenerateRequiredModifier; }
+        set { _configuration.GenerateRequiredModifier = value; }
+    }
+
     public bool ValidationError { get; private set; }
 
     static Generator()

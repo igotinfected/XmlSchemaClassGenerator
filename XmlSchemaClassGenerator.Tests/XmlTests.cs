@@ -61,6 +61,9 @@ public class XmlTests(ITestOutputHelper output)
             AllowDtdParse = generatorPrototype.AllowDtdParse,
             OmitXmlIncludeAttribute = generatorPrototype.OmitXmlIncludeAttribute,
             EnumCollection = generatorPrototype.EnumCollection,
+            EnableNullableReferenceAttributes = generatorPrototype.EnableNullableReferenceAttributes,
+            EnableNullableDirective = generatorPrototype.EnableNullableDirective,
+            GenerateRequiredModifier = generatorPrototype.GenerateRequiredModifier,
         };
 
         gen.CommentLanguages.Clear();
@@ -622,6 +625,102 @@ public class XmlTests(ITestOutputHelper output)
             var expectedCollectionType = collectionType.MakeGenericType(enumType);
             Assert.Equal(expectedCollectionType, enumElemProp.PropertyType);
         }
+    }
+
+    [Fact]
+    public void TestEnumCollectionListElementHasStringProxy()
+    {
+        // xsd:list element properties with EnumCollection should generate:
+        // 1. A typed collection property with [XmlIgnore] for programmatic use
+        // 2. A string proxy property with [XmlElement] for correct space-separated serialization
+        var assembly = Compiler.Generate("ListEnumCollectionProxy", ListPattern, new Generator
+        {
+            GenerateNullables = true,
+            IntegerDataType = typeof(int),
+            DataAnnotationMode = DataAnnotationMode.All,
+            GenerateDesignerCategoryAttribute = false,
+            GenerateComplexTypesForCollections = true,
+            EntityFramework = false,
+            GenerateInterfaces = true,
+            NamespacePrefix = "List",
+            GenerateDescriptionAttribute = true,
+            TextValuePropertyName = "Value",
+            EnumCollection = true,
+        });
+
+        Assert.NotNull(assembly);
+
+        var myClassType = assembly.GetType("List.MyClass");
+        Assert.NotNull(myClassType);
+
+        var enumType = assembly.GetType("List.EnumType");
+        Assert.NotNull(enumType);
+
+        // The typed collection property should exist and have [XmlIgnore]
+        var enumElemProp = myClassType.GetProperty("EnumElem");
+        Assert.NotNull(enumElemProp);
+        Assert.True(enumElemProp.PropertyType.IsGenericType);
+        Assert.Equal(enumType, enumElemProp.PropertyType.GetGenericArguments()[0]);
+        Assert.NotNull(enumElemProp.GetCustomAttribute(typeof(XmlIgnoreAttribute)));
+
+        // The string proxy property should exist and have [XmlElement]
+        var proxyProp = myClassType.GetProperty("EnumElemXml");
+        Assert.NotNull(proxyProp);
+        Assert.Equal(typeof(string), proxyProp.PropertyType);
+        Assert.NotNull(proxyProp.GetCustomAttribute(typeof(XmlElementAttribute)));
+
+        // The proxy should be hidden from IntelliSense
+        var editorBrowsable = (System.ComponentModel.EditorBrowsableAttribute)proxyProp.GetCustomAttribute(typeof(System.ComponentModel.EditorBrowsableAttribute));
+        Assert.NotNull(editorBrowsable);
+        Assert.Equal(System.ComponentModel.EditorBrowsableState.Never, editorBrowsable.State);
+    }
+
+    [Fact]
+    public void TestEnumCollectionListElementSerializesAsSpaceSeparated()
+    {
+        // Verify that the string proxy property correctly converts between
+        // typed enum collection and space-separated XML string.
+        var assembly = Compiler.Generate("ListEnumCollectionSerialize", ListPattern, new Generator
+        {
+            GenerateNullables = true,
+            IntegerDataType = typeof(int),
+            DataAnnotationMode = DataAnnotationMode.All,
+            GenerateDesignerCategoryAttribute = false,
+            GenerateComplexTypesForCollections = true,
+            EntityFramework = false,
+            GenerateInterfaces = true,
+            NamespacePrefix = "List",
+            GenerateDescriptionAttribute = true,
+            TextValuePropertyName = "Value",
+            EnumCollection = true,
+        });
+
+        Assert.NotNull(assembly);
+
+        var myClassType = assembly.GetType("List.MyClass");
+        Assert.NotNull(myClassType);
+
+        var instance = Activator.CreateInstance(myClassType);
+
+        // Set the typed collection to two enum values
+        var enumType = assembly.GetType("List.EnumType");
+        Assert.NotNull(enumType);
+        var enumValues = Enum.GetValues(enumType);
+        Assert.True(enumValues.Length >= 2);
+
+        var listType = typeof(Collection<>).MakeGenericType(enumType);
+        var list = Activator.CreateInstance(listType);
+        listType.GetMethod("Add").Invoke(list, [enumValues.GetValue(0)]);
+        listType.GetMethod("Add").Invoke(list, [enumValues.GetValue(1)]);
+
+        myClassType.GetProperty("EnumElem").SetValue(instance, list);
+
+        // Read the proxy property — should be space-separated XML enum names
+        var proxyValue = (string)myClassType.GetProperty("EnumElemXml").GetValue(instance);
+        Assert.NotNull(proxyValue);
+        Assert.Contains(" ", proxyValue); // space-separated
+        Assert.DoesNotContain("\n", proxyValue); // single line
+        Assert.Equal(2, proxyValue.Split(' ').Length);
     }
 
     public static TheoryData<CodeTypeReferenceOptions, NamingScheme, Type> TestSimpleData() {
@@ -3458,4 +3557,804 @@ namespace Test
         Assert.Equal("Base Value 2", basePropertyProp.GetValue(deserializedItem2));
         Assert.Equal(42, derivedProperty2Prop.GetValue(deserializedItem2));
     }
+
+    // -- EnableNullableDirective and GenerateRequiredModifier tests ----------------
+
+    private const string NullableAndRequiredXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:simpleType name=""StatusEnum"">
+        <xs:restriction base=""xs:string"">
+            <xs:enumeration value=""Active""/>
+            <xs:enumeration value=""Inactive""/>
+            <xs:enumeration value=""Pending""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""RequiredString"" type=""xs:string"" minOccurs=""1""/>
+            <xs:element name=""OptionalString"" type=""xs:string"" minOccurs=""0""/>
+            <xs:element name=""RequiredDate"" type=""xs:dateTime"" minOccurs=""1""/>
+            <xs:element name=""OptionalDate"" type=""xs:dateTime"" minOccurs=""0""/>
+            <xs:element name=""OptionalComplex"" type=""Child"" minOccurs=""0""/>
+            <xs:element name=""Items"" type=""xs:string"" minOccurs=""0"" maxOccurs=""unbounded""/>
+            <xs:element name=""RequiredInt"" type=""xs:int"" minOccurs=""1""/>
+            <xs:element name=""RequiredBool"" type=""xs:boolean"" minOccurs=""1""/>
+            <xs:element name=""RequiredStatus"" type=""StatusEnum"" minOccurs=""1""/>
+            <xs:element name=""OptionalStatus"" type=""StatusEnum"" minOccurs=""0""/>
+            <xs:element name=""RequiredWithDefault"" type=""xs:string"" minOccurs=""1"" default=""hello""/>
+            <xs:element name=""OptionalStringWithDefault"" type=""xs:string"" minOccurs=""0"" default=""fallback""/>
+        </xs:sequence>
+        <xs:attribute name=""RequiredAttr"" type=""xs:string"" use=""required""/>
+        <xs:attribute name=""OptionalAttr"" type=""xs:string"" use=""optional""/>
+    </xs:complexType>
+    <xs:complexType name=""Child"">
+        <xs:sequence>
+            <xs:element name=""Name"" type=""xs:string"" minOccurs=""1""/>
+        </xs:sequence>
+    </xs:complexType>
+    <xs:complexType name=""TextValue"">
+        <xs:simpleContent>
+            <xs:extension base=""xs:string"">
+                <xs:attribute name=""Lang"" type=""xs:string"" use=""optional""/>
+            </xs:extension>
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:simpleType name=""NonEmptyString"">
+        <xs:restriction base=""xs:string"">
+            <xs:minLength value=""1""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:complexType name=""RequiredTextValue"">
+        <xs:simpleContent>
+            <xs:extension base=""NonEmptyString"">
+                <xs:attribute name=""Lang"" type=""xs:string"" use=""optional""/>
+            </xs:extension>
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:complexType name=""EnumTextValue"">
+        <xs:simpleContent>
+            <xs:extension base=""StatusEnum"">
+                <xs:attribute name=""Source"" type=""xs:string"" use=""optional""/>
+            </xs:extension>
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:complexType name=""DoubleTextValue"">
+        <xs:simpleContent>
+            <xs:extension base=""xs:double"">
+                <xs:attribute name=""Unit"" type=""xs:string"" use=""optional""/>
+            </xs:extension>
+        </xs:simpleContent>
+    </xs:complexType>
+</xs:schema>";
+
+    /// <summary>
+    /// Extracts the body of a specific class from the generated code content.
+    /// Matches from "class ClassName" to the next class declaration or end of content.
+    /// </summary>
+    private static string ExtractClassBlock(string content, string className)
+    {
+        var pattern = $@"partial class {Regex.Escape(className)}\b.*?(?=partial class |\z)";
+        var match = Regex.Match(content, pattern, RegexOptions.Singleline);
+        Assert.True(match.Success, $"Class '{className}' not found in generated content.");
+        return match.Value;
+    }
+
+    private static Generator CreateNullableRequiredGenerator(
+        bool enableNullableDirective = false,
+        bool generateRequiredModifier = false,
+        bool enableNullableReferenceAttributes = false)
+    {
+        return new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            EnableNullableReferenceAttributes = enableNullableReferenceAttributes,
+            EnableNullableDirective = enableNullableDirective,
+            GenerateRequiredModifier = generateRequiredModifier,
+            GenerateNullables = true,
+            DataAnnotationMode = DataAnnotationMode.All,
+            NetCoreSpecificCode = true,
+        };
+    }
+
+    [Fact]
+    public void TestRequiredModifierOnRequiredElements()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierOnRequiredElements), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Required string element: gets 'required' modifier
+        Assert.Contains("public required string RequiredString", content);
+
+        // Required dateTime element: gets 'required' modifier
+        Assert.Contains("public required System.DateTime RequiredDate", content);
+
+        // Required attribute: gets 'required' modifier
+        Assert.Contains("public required string RequiredAttr", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierNotOnOptionalElements()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierNotOnOptionalElements), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Optional string element: no 'required' modifier
+        Assert.DoesNotContain("required string OptionalString", content);
+        Assert.DoesNotContain("required string OptionalAttr", content);
+
+        // Optional complex element: no 'required' modifier
+        Assert.DoesNotContain("required Test.Child OptionalComplex", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierNotOnCollections()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierNotOnCollections), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Collection property: never gets 'required' modifier
+        Assert.DoesNotContain("required", content.Split('\n')
+            .FirstOrDefault(l => l.Contains("Items")) ?? "");
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyIsNullableWhenUnconstrained()
+    {
+        // TextValue extends xs:string with no minLength — text body is optional.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyIsNullableWhenUnconstrained), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var textValueBlock = ExtractClassBlock(content, "TextValue");
+
+        // Unconstrained simpleContent: nullable, not required.
+        Assert.Contains("public string? Value", textValueBlock);
+        Assert.DoesNotContain("required string Value", textValueBlock);
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyIsRequiredWhenConstrainedByMinLength()
+    {
+        // RequiredTextValue extends NonEmptyString (minLength=1) — text body is required.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyIsRequiredWhenConstrainedByMinLength), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var requiredBlock = ExtractClassBlock(content, "RequiredTextValue");
+
+        // Constrained simpleContent: required, not nullable.
+        Assert.Contains("public required string Value", requiredBlock);
+        Assert.DoesNotContain("string? Value", requiredBlock);
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyPlainStringWhenNullableDirectiveOff()
+    {
+        // Without EnableNullableDirective, unconstrained Value is a plain string.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: false,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyPlainStringWhenNullableDirectiveOff), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var textValueBlock = ExtractClassBlock(content, "TextValue");
+
+        Assert.Contains("public string Value", textValueBlock);
+        Assert.DoesNotContain("string? Value", textValueBlock);
+        Assert.DoesNotContain("required string Value", textValueBlock);
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyRequiredWhenConstrainedAndNullableDirectiveOff()
+    {
+        // Constrained text value gets required even without nullable directive.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: false,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyRequiredWhenConstrainedAndNullableDirectiveOff), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var requiredBlock = ExtractClassBlock(content, "RequiredTextValue");
+
+        Assert.Contains("public required string Value", requiredBlock);
+        Assert.DoesNotContain("string? Value", requiredBlock);
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyNoBothFlagsOff()
+    {
+        // Both flags off: always plain string, regardless of constraints.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: false,
+            generateRequiredModifier: false);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyNoBothFlagsOff), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Both TextValue and RequiredTextValue should be plain string.
+        foreach (var className in new[] { "TextValue", "RequiredTextValue" })
+        {
+            var block = ExtractClassBlock(content, className);
+            Assert.Contains("public string Value", block);
+            Assert.DoesNotContain("string? Value", block);
+            Assert.DoesNotContain("required string Value", block);
+        }
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyEnumBaseIsNeverNullable()
+    {
+        // EnumTextValue extends StatusEnum — value types must NOT get '?' suffix
+        // because Nullable<T> + [XmlText] causes XmlSerializer to crash.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyEnumBaseIsNeverNullable), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "EnumTextValue");
+
+        // Enum value type: never nullable, never Nullable<T>.
+        // The type may or may not be namespace-qualified depending on CodeDom output.
+        Assert.Contains("StatusEnum Value", block);
+        Assert.DoesNotContain("StatusEnum? Value", block);
+        Assert.DoesNotContain("Nullable", block);
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyDoubleBaseIsNeverNullable()
+    {
+        // DoubleTextValue extends xs:double — value types must NOT get '?' suffix
+        // because Nullable<T> + [XmlText] causes XmlSerializer to crash.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyDoubleBaseIsNeverNullable), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "DoubleTextValue");
+
+        // Double value type: never nullable.
+        Assert.Contains("public double Value", block);
+        Assert.DoesNotContain("double? Value", block);
+        Assert.DoesNotContain("Nullable", block);
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyStringBaseStillNullable()
+    {
+        // Verify that the value-type guard does NOT affect string (reference type) behavior.
+        // TextValue extends xs:string with no minLength — should still be nullable.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyStringBaseStillNullable), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "TextValue");
+
+        // String reference type: still nullable when unconstrained.
+        Assert.Contains("public string? Value", block);
+        Assert.DoesNotContain("required string Value", block);
+    }
+
+    [Fact]
+    public void TestNullableDirectiveUsesQuestionMarkSyntax()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+
+        var contents = ConvertXml(nameof(TestNullableDirectiveUsesQuestionMarkSyntax), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Optional string element: uses '?' suffix instead of [AllowNull][MaybeNull]
+        Assert.Contains("string? OptionalString", content);
+
+        // Optional complex element: uses '?' suffix
+        Assert.Contains("Child? OptionalComplex", content);
+
+        // [AllowNull] and [MaybeNull] should NOT be present for nullable properties
+        Assert.DoesNotContain("AllowNullAttribute", content);
+        Assert.DoesNotContain("MaybeNullAttribute", content);
+    }
+
+    [Fact]
+    public void TestNullableDirectiveOffUsesAttributes()
+    {
+        // When EnableNullableDirective is off but EnableNullableReferenceAttributes is on,
+        // the old [AllowNull]/[MaybeNull] attributes should be used.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableReferenceAttributes: true);
+
+        var contents = ConvertXml(nameof(TestNullableDirectiveOffUsesAttributes), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Should use attributes, not '?' syntax
+        Assert.Contains("AllowNullAttribute", content);
+        Assert.Contains("MaybeNullAttribute", content);
+        Assert.DoesNotContain("System.String?", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierOffDoesNotEmitRequired()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: false);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierOffDoesNotEmitRequired), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // 'required' keyword should not appear anywhere in the generated code
+        Assert.DoesNotContain("required ", content);
+    }
+
+    [Fact]
+    public void TestNullableDirectiveInjectsDirectiveInFileOutput()
+    {
+        // This test uses the file-based output pipeline to verify
+        // that #nullable enable is injected into the generated file.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestNullableDirectiveInjectsDirectiveInFileOutput)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(NullableAndRequiredXsd) });
+
+        // Read the generated files and verify #nullable enable is present
+        foreach (var file in output.Files)
+        {
+            var fileContent = File.ReadAllText(file);
+            Assert.Contains("#nullable enable", fileContent);
+            // Should come after the auto-generated comment
+            var directiveIndex = fileContent.IndexOf("#nullable enable", StringComparison.Ordinal);
+            var autoGenIndex = fileContent.IndexOf("</auto-generated>", StringComparison.Ordinal);
+            Assert.True(directiveIndex > autoGenIndex,
+                $"#nullable enable should appear after </auto-generated> in {Path.GetFileName(file)}");
+        }
+    }
+
+    [Fact]
+    public void TestNullableDirectiveNotInjectedWhenDisabled()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: false);
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestNullableDirectiveNotInjectedWhenDisabled)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(NullableAndRequiredXsd) });
+
+        foreach (var file in output.Files)
+        {
+            var fileContent = File.ReadAllText(file);
+            Assert.DoesNotContain("#nullable enable", fileContent);
+        }
+    }
+
+    [Fact]
+    public void TestNullableCollectionUsesQuestionMarkSuffix()
+    {
+        // Generic collection types (e.g. Collection<string>) now correctly get the '?' suffix
+        // because WrapTypeRef renders the type via CSharpCodeProvider first, then creates a
+        // literal CodeTypeReference that CodeDom outputs verbatim. No attribute fallback needed.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+        generator.CollectionSettersMode = CollectionSettersMode.Init;
+        generator.CollectionType = typeof(System.Collections.ObjectModel.Collection<>);
+
+        var contents = ConvertXml(nameof(TestNullableCollectionUsesQuestionMarkSuffix), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // The collection backing field should have '?' on its type
+        var lines = content.Split('\n');
+        var backingFieldLine = lines.FirstOrDefault(l => l.Contains("_items") && l.Contains("private"));
+        Assert.NotNull(backingFieldLine);
+        Assert.Contains("?", backingFieldLine);
+
+        // No [AllowNull]/[MaybeNull] attribute fallback when EnableNullableDirective is on
+        Assert.DoesNotContain("AllowNullAttribute", content);
+        Assert.DoesNotContain("MaybeNullAttribute", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierOnRequiredValueTypes()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierOnRequiredValueTypes), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Required int element: gets 'required' modifier
+        Assert.Contains("public required int RequiredInt", content);
+
+        // Required bool element: gets 'required' modifier
+        Assert.Contains("public required bool RequiredBool", content);
+    }
+
+    [Fact]
+    public void TestRequiredReferenceTypeNotNullable()
+    {
+        // When both flags are on, a required string should be 'required string',
+        // NOT 'required string?' — required properties are non-nullable.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredReferenceTypeNotNullable), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Required string must NOT have '?' suffix
+        Assert.Contains("public required string RequiredString", content);
+        Assert.DoesNotContain("required string? RequiredString", content);
+
+        // Required attribute must NOT have '?' suffix
+        Assert.Contains("public required string RequiredAttr", content);
+        Assert.DoesNotContain("required string? RequiredAttr", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierWithoutNullableDirective()
+    {
+        // GenerateRequiredModifier works independently of EnableNullableDirective.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: false,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierWithoutNullableDirective), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // 'required' should still be emitted on required properties
+        Assert.Contains("public required string RequiredString", content);
+        Assert.Contains("public required int RequiredInt", content);
+        Assert.Contains("public required string RequiredAttr", content);
+
+        // '?' syntax should NOT be used (EnableNullableDirective is off)
+        Assert.DoesNotContain("string?", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierWithDefaultValue()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierWithDefaultValue), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // A required element with a default value should still get 'required'.
+        // It takes the DefaultValue != null code path in PropertyModel.AddMembersTo.
+        Assert.Contains("public required string RequiredWithDefault", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierOnRequiredEnum()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierOnRequiredEnum), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Required enum element: gets 'required' modifier
+        Assert.Contains("public required StatusEnum RequiredStatus", content);
+
+        // Optional enum element: no 'required' modifier
+        Assert.DoesNotContain("required StatusEnum OptionalStatus", content);
+    }
+
+    [Fact]
+    public void TestNullableDirectiveAndRequiredCompilationRoundTrip()
+    {
+        // Generate files with both flags on and compile via Roslyn to verify
+        // the generated code is valid C# with zero errors and zero warnings.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestNullableDirectiveAndRequiredCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(NullableAndRequiredXsd) });
+
+        // CompileFiles reads the generated .cs files (which include #nullable enable)
+        // and compiles them with the latest C# language version.
+        // It asserts zero errors and zero warnings internally.
+        var assembly = Compiler.CompileFiles(nameof(TestNullableDirectiveAndRequiredCompilationRoundTrip), output.Files);
+
+        Assert.NotNull(assembly);
+
+        // Verify the types exist in the compiled assembly
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+
+        var childType = assembly.GetType("Test.Child");
+        Assert.NotNull(childType);
+
+        var textValueType = assembly.GetType("Test.TextValue");
+        Assert.NotNull(textValueType);
+
+        var enumType = assembly.GetType("Test.StatusEnum");
+        Assert.NotNull(enumType);
+    }
+
+    [Fact]
+    public void TestNullableDirectiveOnInterfaceMembers()
+    {
+        // When GenerateInterfaces and EnableNullableDirective are both on,
+        // interface members for optional reference types should use '?' syntax
+        // to match the implementing class.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+        generator.GenerateInterfaces = true;
+
+        var contents = ConvertXml(nameof(TestNullableDirectiveOnInterfaceMembers), NullableAndRequiredInterfaceXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Extract the interface section (from 'public partial interface' to the end of content)
+        var idx = content.IndexOf("public partial interface", StringComparison.Ordinal);
+        Assert.True(idx >= 0, "Expected to find 'public partial interface' in generated code");
+        var interfaceSection = content.Substring(idx);
+
+        // The interface should declare optional string property with '?'
+        Assert.Contains("string? OptionalLabel", interfaceSection);
+        // The required string property should NOT have '?'
+        Assert.DoesNotContain("string? RequiredId", interfaceSection);
+    }
+
+    [Fact]
+    public void TestRequiredModifierSuppressesRequiredAttribute()
+    {
+        // When GenerateRequiredModifier is on, the C# 11 'required' modifier supersedes
+        // [RequiredAttribute] — the attribute should not be emitted.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierSuppressesRequiredAttribute), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // 'required' keyword should be present
+        Assert.Contains("public required string RequiredString", content);
+
+        // [RequiredAttribute] should NOT be present
+        Assert.DoesNotContain("RequiredAttribute", content);
+        Assert.DoesNotContain("AllowEmptyStrings", content);
+    }
+
+    [Fact]
+    public void TestRequiredAttributeStillEmittedWithoutRequiredModifier()
+    {
+        // When GenerateRequiredModifier is off, [RequiredAttribute] should still be emitted
+        // as before — this is the pre-existing behavior.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: false);
+
+        var contents = ConvertXml(nameof(TestRequiredAttributeStillEmittedWithoutRequiredModifier), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // No 'required' keyword
+        Assert.DoesNotContain("public required ", content);
+
+        // [RequiredAttribute] should be present on required properties
+        Assert.Contains("RequiredAttribute", content);
+        Assert.Contains("AllowEmptyStrings", content);
+    }
+
+    // XSD that exercises generic collection types and array types for nullable rendering.
+    // - Tags: optional unbounded string elements (→ List<string> or Collection<string>)
+    // - Data: optional base64Binary (→ byte[])
+    // - Name: required string (control — should NOT be nullable)
+    private const string NullableCollectionAndArrayXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:complexType name=""Container"">
+        <xs:sequence>
+            <xs:element name=""Name"" type=""xs:string"" minOccurs=""1""/>
+            <xs:element name=""Tags"" type=""xs:string"" minOccurs=""0"" maxOccurs=""unbounded""/>
+            <xs:element name=""Data"" type=""xs:base64Binary"" minOccurs=""0""/>
+            <xs:element name=""OptionalChild"" type=""Nested"" minOccurs=""0""/>
+        </xs:sequence>
+    </xs:complexType>
+    <xs:complexType name=""Nested"">
+        <xs:sequence>
+            <xs:element name=""Values"" type=""xs:int"" minOccurs=""0"" maxOccurs=""unbounded""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestNullableGenericCollectionRendersCorrectSyntax()
+    {
+        // Verify that optional collection types produce "Collection<string>?" and NOT
+        // the broken "Collection<>?<string>" that CodeDom produces when '?' is appended
+        // directly to the BaseType of a generic CodeTypeReference.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+        generator.CollectionSettersMode = CollectionSettersMode.Init;
+        generator.CollectionType = typeof(System.Collections.ObjectModel.Collection<>);
+
+        var contents = ConvertXml(nameof(TestNullableGenericCollectionRendersCorrectSyntax), NullableCollectionAndArrayXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Should contain the correct nullable collection syntax
+        Assert.Contains("Collection<string>?", content);
+
+        // Must NOT contain the broken CodeDom output
+        Assert.DoesNotContain("Collection<>?", content);
+        Assert.DoesNotContain("<>?<", content);
+    }
+
+    [Fact]
+    public void TestNullableListCollectionRendersCorrectSyntax()
+    {
+        // Same test but with List<T> which is the more common collection type.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+        generator.CollectionSettersMode = CollectionSettersMode.Init;
+        // CollectionType defaults to Collection<>, so set it to List<> explicitly
+        generator.CollectionType = typeof(System.Collections.Generic.List<>);
+
+        var contents = ConvertXml(nameof(TestNullableListCollectionRendersCorrectSyntax), NullableCollectionAndArrayXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Should contain the correct nullable List<T> syntax for string collections
+        // (string is a reference type so IsNullableReferenceType is true → gets '?')
+        Assert.Contains("List<string>?", content);
+
+        // List<int> does NOT get '?' because the element type (int) is a value type,
+        // so IsNullableReferenceType is false for that property. This matches upstream behavior.
+        Assert.DoesNotContain("List<int>?", content);
+
+        // Must NOT contain broken CodeDom output
+        Assert.DoesNotContain("List<>?", content);
+        Assert.DoesNotContain("<>?<", content);
+    }
+
+    [Fact]
+    public void TestNullableByteArrayRendersCorrectSyntax()
+    {
+        // Verify that optional byte[] (from xs:base64Binary) produces "byte[]?" and NOT
+        // "byte?[]" (which would mean "array of nullable bytes" — wrong semantics).
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+
+        var contents = ConvertXml(nameof(TestNullableByteArrayRendersCorrectSyntax), NullableCollectionAndArrayXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Should contain "byte[]?" for optional base64Binary
+        Assert.Contains("byte[]?", content);
+
+        // Must NOT contain "byte?[]" (nullable element instead of nullable array)
+        Assert.DoesNotContain("byte?[]", content);
+    }
+
+    [Fact]
+    public void TestNullableCollectionAndArrayCompilationRoundTrip()
+    {
+        // Compilation round-trip: generate files with EnableNullableDirective and
+        // Collection<T> with init setters, then compile via Roslyn.
+        // This catches any broken type syntax that slips past string assertions.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+        generator.CollectionSettersMode = CollectionSettersMode.Init;
+        generator.CollectionType = typeof(System.Collections.ObjectModel.Collection<>);
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestNullableCollectionAndArrayCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(NullableCollectionAndArrayXsd) });
+
+        var assembly = Compiler.CompileFiles(nameof(TestNullableCollectionAndArrayCompilationRoundTrip), output.Files);
+
+        Assert.NotNull(assembly);
+
+        var containerType = assembly.GetType("Test.Container");
+        Assert.NotNull(containerType);
+
+        var nestedType = assembly.GetType("Test.Nested");
+        Assert.NotNull(nestedType);
+    }
+
+    [Fact]
+    public void TestOptionalReferenceTypeWithDefaultIsNullable()
+    {
+        // Issue: optional reference types with a default value (minOccurs=0 + default="...")
+        // were not getting the '?' suffix because IsNullable requires DefaultValue == null.
+        // Under #nullable enable, these properties must be nullable — the element can be absent
+        // from XML, and users should be able to assign null without a compiler warning.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+
+        var contents = ConvertXml(nameof(TestOptionalReferenceTypeWithDefaultIsNullable), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // OptionalStringWithDefault: minOccurs=0, default="fallback" → should be string?
+        Assert.Contains("string? OptionalStringWithDefault", content);
+
+        // Control: RequiredWithDefault (minOccurs=1) should NOT be nullable
+        Assert.DoesNotContain("string? RequiredWithDefault", content);
+
+        // Control: OptionalString (no default) should still be nullable
+        Assert.Contains("string? OptionalString", content);
+    }
+
+    [Fact]
+    public void TestOptionalReferenceTypeWithDefaultNotNullableWhenDirectiveOff()
+    {
+        // When EnableNullableDirective is off, the default-value + optional combination
+        // should NOT add '?' (preserves upstream behavior).
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: false);
+
+        var contents = ConvertXml(nameof(TestOptionalReferenceTypeWithDefaultNotNullableWhenDirectiveOff), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // No '?' syntax should appear at all when the directive is off
+        Assert.DoesNotContain("string?", content);
+        Assert.DoesNotContain("Child?", content);
+    }
+
+    [Fact]
+    public void TestOptionalReferenceTypeWithDefaultCompilationRoundTrip()
+    {
+        // Compilation round-trip: optional ref types with defaults should compile cleanly.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestOptionalReferenceTypeWithDefaultCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(NullableAndRequiredXsd) });
+
+        var assembly = Compiler.CompileFiles(nameof(TestOptionalReferenceTypeWithDefaultCompilationRoundTrip), output.Files);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+    }
+
+    private const string NullableAndRequiredInterfaceXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:attributeGroup name=""CommonAttrs"">
+        <xs:attribute name=""RequiredId"" type=""xs:string"" use=""required""/>
+        <xs:attribute name=""OptionalLabel"" type=""xs:string"" use=""optional""/>
+    </xs:attributeGroup>
+    <xs:complexType name=""ItemA"">
+        <xs:sequence>
+            <xs:element name=""Name"" type=""xs:string"" minOccurs=""1""/>
+        </xs:sequence>
+        <xs:attributeGroup ref=""CommonAttrs""/>
+    </xs:complexType>
+</xs:schema>";
+
 }

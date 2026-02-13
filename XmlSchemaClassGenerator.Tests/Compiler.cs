@@ -121,6 +121,8 @@ class Compiler
             SeparateNamespaceHierarchy = generatorPrototype.SeparateNamespaceHierarchy,
             OmitXmlIncludeAttribute = generatorPrototype.OmitXmlIncludeAttribute,
             EnumCollection = generatorPrototype.EnumCollection,
+            EnableNullableDirective = generatorPrototype.EnableNullableDirective,
+            GenerateRequiredModifier = generatorPrototype.GenerateRequiredModifier,
         };
 
         gen.CommentLanguages.Clear();
