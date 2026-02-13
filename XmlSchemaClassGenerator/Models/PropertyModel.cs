@@ -46,6 +46,18 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
     public int? Order { get; set; }
     public bool IsKey { get; set; }
 
+    /// <summary>
+    /// Identifies which choice group this property belongs to, if any.
+    /// Null means the property is not part of a choice.
+    /// </summary>
+    public int? ChoiceGroupId { get; set; }
+
+    /// <summary>
+    /// Identifies which arm within a choice group this property belongs to.
+    /// Elements in the same arm (e.g. from a sequence within a choice) share the same arm ID.
+    /// </summary>
+    public int? ChoiceArmId { get; set; }
+
     public void SetFromNode(string originalName, bool useFixedIfNoDefault, IXmlSchemaNode xs)
     {
         OriginalPropertyName = originalName;
@@ -67,6 +79,9 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
         IsRequired = isRequired;
         IsCollection = item.MaxOccurs > 1.0m || particle.MaxOccurs > 1.0m; // http://msdn.microsoft.com/en-us/library/vstudio/d3hx2s7e(v=vs.100).aspx
+
+        ChoiceGroupId = item.ChoiceGroupId;
+        ChoiceArmId = item.ChoiceArmId;
     }
 
     public void SetSchemaNameAndNamespace(TypeModel owningTypeModel, IXmlSchemaNode xs)
@@ -728,6 +743,18 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
         if (IsAny && Configuration.EntityFramework)
             member.CustomAttributes.Add(notMappedAttribute);
+
+        if (ChoiceGroupId.HasValue && Configuration.GenerateChoiceGroupAttributes)
+        {
+            var attrTypeRef = CodeUtilities.IsUsingNamespace("XmlSchemaClassGenerator.Attributes", Configuration)
+                ? new CodeTypeReference("XmlChoiceGroupAttribute")
+                : new CodeTypeReference("XmlSchemaClassGenerator.Attributes.XmlChoiceGroupAttribute");
+            var choiceAttr = new CodeAttributeDeclaration(
+                attrTypeRef,
+                new CodeAttributeArgument(new CodePrimitiveExpression(ChoiceGroupId.Value)),
+                new CodeAttributeArgument(new CodePrimitiveExpression(ChoiceArmId ?? 0)));
+            member.CustomAttributes.Add(choiceAttr);
+        }
 
         Configuration.MemberVisitor(member, this);
     }

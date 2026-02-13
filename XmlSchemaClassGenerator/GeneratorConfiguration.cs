@@ -393,4 +393,11 @@ public class GeneratorConfiguration
     /// the strongest compile-time safety. Default is false.
     /// </summary>
     public bool GenerateRequiredModifier { get; set; }
+
+    /// <summary>
+    /// Emit <c>[XmlChoiceGroup(groupId, armId)]</c> attributes on properties that correspond
+    /// to elements within an <c>xsd:choice</c> group. This metadata can be consumed by a Roslyn
+    /// analyzer to enforce mutual exclusivity at compile time. Default is false.
+    /// </summary>
+    public bool GenerateChoiceGroupAttributes { get; set; }
 }

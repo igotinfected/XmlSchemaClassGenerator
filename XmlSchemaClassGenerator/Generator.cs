@@ -390,6 +390,12 @@ public class Generator
         set { _configuration.GenerateRequiredModifier = value; }
     }
 
+    public bool GenerateChoiceGroupAttributes
+    {
+        get { return _configuration.GenerateChoiceGroupAttributes; }
+        set { _configuration.GenerateChoiceGroupAttributes = value; }
+    }
+
     public bool ValidationError { get; private set; }
 
     static Generator()

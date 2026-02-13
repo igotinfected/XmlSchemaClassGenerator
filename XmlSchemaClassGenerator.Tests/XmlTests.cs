@@ -64,6 +64,7 @@ public class XmlTests(ITestOutputHelper output)
             EnableNullableReferenceAttributes = generatorPrototype.EnableNullableReferenceAttributes,
             EnableNullableDirective = generatorPrototype.EnableNullableDirective,
             GenerateRequiredModifier = generatorPrototype.GenerateRequiredModifier,
+            GenerateChoiceGroupAttributes = generatorPrototype.GenerateChoiceGroupAttributes,
         };
 
         gen.CommentLanguages.Clear();
@@ -4356,5 +4357,308 @@ namespace Test
         <xs:attributeGroup ref=""CommonAttrs""/>
     </xs:complexType>
 </xs:schema>";
+
+    // -- GenerateChoiceGroupAttributes tests ----------------
+
+    private const string ChoiceGroupXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:simpleType name=""PercentageType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:minInclusive value=""0""/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- Case 1: Simple choice (each arm = single element) -->
+    <xs:complexType name=""SimpleChoice"">
+        <xs:sequence>
+            <xs:element name=""Name"" type=""xs:string"" minOccurs=""1""/>
+            <xs:choice>
+                <xs:element name=""Count"" type=""xs:integer""/>
+                <xs:element name=""Percentage"" type=""PercentageType""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 2: Multiple choice groups in the same type -->
+    <xs:complexType name=""MultipleChoices"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:element name=""Alpha"" type=""xs:string""/>
+                <xs:element name=""Beta"" type=""xs:string""/>
+            </xs:choice>
+            <xs:element name=""Middle"" type=""xs:string"" minOccurs=""0""/>
+            <xs:choice>
+                <xs:element name=""Gamma"" type=""xs:string""/>
+                <xs:element name=""Delta"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 3: Choice with sequence arm -->
+    <xs:complexType name=""ChoiceWithSequence"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:element name=""Simple"" type=""xs:string""/>
+                <xs:sequence>
+                    <xs:element name=""PartA"" type=""xs:string""/>
+                    <xs:element name=""PartB"" type=""xs:string""/>
+                </xs:sequence>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 4: Both arms are sequences -->
+    <xs:complexType name=""BothArmsSequences"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:sequence>
+                    <xs:element name=""StartRef"" type=""xs:string""/>
+                    <xs:element name=""StartName"" type=""xs:string""/>
+                </xs:sequence>
+                <xs:sequence>
+                    <xs:element name=""EndRef"" type=""xs:string""/>
+                    <xs:element name=""EndName"" type=""xs:string""/>
+                </xs:sequence>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 5: Nested choice-in-choice (direct) — should flatten -->
+    <xs:complexType name=""NestedChoice"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:choice>
+                    <xs:element name=""A"" type=""xs:string""/>
+                    <xs:element name=""B"" type=""xs:string""/>
+                </xs:choice>
+                <xs:element name=""C"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 6: Choice inside sequence inside choice — NOT flattened -->
+    <xs:complexType name=""ChoiceInSequenceInChoice"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:sequence>
+                    <xs:choice>
+                        <xs:element name=""InnerX"" type=""xs:string""/>
+                        <xs:element name=""InnerY"" type=""xs:string""/>
+                    </xs:choice>
+                    <xs:element name=""Extra"" type=""xs:string""/>
+                </xs:sequence>
+                <xs:element name=""Standalone"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 7: No choice (control — should have no attributes) -->
+    <xs:complexType name=""NoChoice"">
+        <xs:sequence>
+            <xs:element name=""Foo"" type=""xs:string""/>
+            <xs:element name=""Bar"" type=""xs:string""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    private static Generator CreateChoiceGroupGenerator()
+    {
+        return new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+            DataAnnotationMode = DataAnnotationMode.All,
+            NetCoreSpecificCode = true,
+            GenerateChoiceGroupAttributes = true,
+        };
+    }
+
+    [Fact]
+    public void TestChoiceGroupSimpleChoiceEmitsAttributes()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupSimpleChoiceEmitsAttributes), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "SimpleChoice");
+
+        // Count and Percentage should have XmlChoiceGroup attributes with same groupId, different armIds.
+        Assert.Matches(@"XmlChoiceGroupAttribute\(\d+, 0\).*Count", block.Replace("\n", " "));
+        Assert.Matches(@"XmlChoiceGroupAttribute\(\d+, 1\).*Percentage", block.Replace("\n", " "));
+
+        // Name is not in a choice — should NOT have the attribute.
+        var nameLines = block.Split('\n').Where(l => l.Contains("\"Name\"") || l.Contains("Name {")).ToList();
+        Assert.DoesNotContain("XmlChoiceGroup", string.Join(" ", nameLines));
+    }
+
+    [Fact]
+    public void TestChoiceGroupMultipleGroupsHaveDifferentIds()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupMultipleGroupsHaveDifferentIds), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "MultipleChoices");
+
+        // Extract all XmlChoiceGroupAttribute occurrences.
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+)\)");
+        Assert.Equal(4, matches.Count); // Alpha, Beta, Gamma, Delta
+
+        var groupIds = matches.Select(m => int.Parse(m.Groups[1].Value)).Distinct().ToList();
+        Assert.Equal(2, groupIds.Count); // Two distinct group IDs
+
+        // Alpha and Beta share a group, Gamma and Delta share a different group.
+        var group1Arms = matches.Where(m => int.Parse(m.Groups[1].Value) == groupIds[0])
+            .Select(m => int.Parse(m.Groups[2].Value)).OrderBy(x => x).ToList();
+        var group2Arms = matches.Where(m => int.Parse(m.Groups[1].Value) == groupIds[1])
+            .Select(m => int.Parse(m.Groups[2].Value)).OrderBy(x => x).ToList();
+        Assert.Equal([0, 1], group1Arms);
+        Assert.Equal([0, 1], group2Arms);
+
+        // Middle is not in a choice — should NOT have the attribute.
+        Assert.DoesNotContain("XmlChoiceGroup", block.Split('\n')
+            .FirstOrDefault(l => l.Contains("\"Middle\"")) ?? "");
+    }
+
+    [Fact]
+    public void TestChoiceGroupSequenceArmsShareArmId()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupSequenceArmsShareArmId), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "ChoiceWithSequence");
+
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+)\)");
+        Assert.Equal(3, matches.Count); // Simple, PartA, PartB
+
+        // All should share the same groupId.
+        var groupIds = matches.Select(m => int.Parse(m.Groups[1].Value)).Distinct().ToList();
+        Assert.Single(groupIds);
+
+        // Simple should be arm 0. PartA and PartB should share arm 1 (from the sequence).
+        var arms = matches.Select(m => (
+            arm: int.Parse(m.Groups[2].Value),
+            // Find the property name after this attribute
+            text: block.Substring(m.Index)
+        )).ToList();
+
+        // Simple = arm 0
+        var simpleArm = matches.First(m => block.Substring(m.Index, 100).Contains("Simple"));
+        Assert.Equal("0", simpleArm.Groups[2].Value);
+
+        // PartA and PartB = arm 1
+        var partAArm = matches.First(m => block.Substring(m.Index, 100).Contains("PartA"));
+        var partBArm = matches.First(m => block.Substring(m.Index, 100).Contains("PartB"));
+        Assert.Equal("1", partAArm.Groups[2].Value);
+        Assert.Equal("1", partBArm.Groups[2].Value);
+    }
+
+    [Fact]
+    public void TestChoiceGroupBothArmsSequences()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupBothArmsSequences), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "BothArmsSequences");
+
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+)\)");
+        Assert.Equal(4, matches.Count); // StartRef, StartName, EndRef, EndName
+
+        // All share the same groupId.
+        var groupIds = matches.Select(m => int.Parse(m.Groups[1].Value)).Distinct().ToList();
+        Assert.Single(groupIds);
+
+        // StartRef + StartName = arm 0, EndRef + EndName = arm 1.
+        var startRefArm = matches.First(m => block.Substring(m.Index, 100).Contains("StartRef"));
+        var startNameArm = matches.First(m => block.Substring(m.Index, 100).Contains("StartName"));
+        var endRefArm = matches.First(m => block.Substring(m.Index, 100).Contains("EndRef"));
+        var endNameArm = matches.First(m => block.Substring(m.Index, 100).Contains("EndName"));
+
+        Assert.Equal(startRefArm.Groups[2].Value, startNameArm.Groups[2].Value); // same arm
+        Assert.Equal(endRefArm.Groups[2].Value, endNameArm.Groups[2].Value);     // same arm
+        Assert.NotEqual(startRefArm.Groups[2].Value, endRefArm.Groups[2].Value); // different arms
+    }
+
+    [Fact]
+    public void TestChoiceGroupNestedChoiceFlattens()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupNestedChoiceFlattens), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "NestedChoice");
+
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+)\)");
+        Assert.Equal(3, matches.Count); // A, B, C
+
+        // All should share the same groupId (nested choice flattened).
+        var groupIds = matches.Select(m => int.Parse(m.Groups[1].Value)).Distinct().ToList();
+        Assert.Single(groupIds);
+
+        // A, B, C should all have distinct arm IDs.
+        var armIds = matches.Select(m => int.Parse(m.Groups[2].Value)).OrderBy(x => x).ToList();
+        Assert.Equal(3, armIds.Distinct().Count());
+    }
+
+    [Fact]
+    public void TestChoiceGroupChoiceInSequenceInChoiceNotFlattened()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupChoiceInSequenceInChoiceNotFlattened), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "ChoiceInSequenceInChoice");
+
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+)\)");
+        // InnerX, InnerY (inner choice group), Extra (outer arm 0), Standalone (outer arm 1)
+        Assert.Equal(4, matches.Count);
+
+        // Should have TWO distinct group IDs (inner choice is NOT flattened).
+        var groupIds = matches.Select(m => int.Parse(m.Groups[1].Value)).Distinct().OrderBy(x => x).ToList();
+        Assert.Equal(2, groupIds.Count);
+
+        // InnerX and InnerY have the inner group ID with different arms.
+        var innerXMatch = matches.First(m => block.Substring(m.Index, 120).Contains("InnerX"));
+        var innerYMatch = matches.First(m => block.Substring(m.Index, 120).Contains("InnerY"));
+        Assert.Equal(innerXMatch.Groups[1].Value, innerYMatch.Groups[1].Value); // same group
+        Assert.NotEqual(innerXMatch.Groups[2].Value, innerYMatch.Groups[2].Value); // different arms
+
+        // Extra and Standalone have the outer group ID.
+        var extraMatch = matches.First(m => block.Substring(m.Index, 120).Contains("Extra"));
+        var standaloneMatch = matches.First(m => block.Substring(m.Index, 120).Contains("Standalone"));
+        Assert.Equal(extraMatch.Groups[1].Value, standaloneMatch.Groups[1].Value); // same group
+        Assert.NotEqual(extraMatch.Groups[1].Value, innerXMatch.Groups[1].Value); // different from inner group
+    }
+
+    [Fact]
+    public void TestChoiceGroupNotEmittedWhenFlagOff()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        generator.GenerateChoiceGroupAttributes = false;
+        var contents = ConvertXml(nameof(TestChoiceGroupNotEmittedWhenFlagOff), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.DoesNotContain("XmlChoiceGroup", content);
+    }
+
+    [Fact]
+    public void TestChoiceGroupNoAttributeOnNonChoiceElements()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupNoAttributeOnNonChoiceElements), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "NoChoice");
+
+        Assert.DoesNotContain("XmlChoiceGroup", block);
+    }
+
+    [Fact]
+    public void TestChoiceGroupAttributeClassGenerated()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupAttributeClassGenerated), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // The XmlChoiceGroupAttribute class should be generated.
+        Assert.Contains("class XmlChoiceGroupAttribute", content);
+        Assert.Contains("public int GroupId", content);
+        Assert.Contains("public int ArmId", content);
+    }
 
 }

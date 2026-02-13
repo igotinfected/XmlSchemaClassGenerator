@@ -61,6 +61,7 @@ static class Program
         var nullableReferenceAttributes = false;
         var enableNullableDirective = false;
         var generateRequiredModifier = false;
+        var generateChoiceGroupAttributes = false;
         var generateCommandLineArgs = true;
         var useArrayItemAttribute = true;
         var enumAsString = false;
@@ -168,6 +169,7 @@ with or without backing field initialization for collections
             { "nr|nullableReferenceAttributes", "generate attributes for nullable reference types (default is false)", v => nullableReferenceAttributes = v != null },
             { "nd|nullableDirective", "emit #nullable enable and use native nullable reference type syntax (default is false)", v => enableNullableDirective = v != null },
             { "rm|requiredModifier", "emit C# 11 required modifier on required properties (default is false)", v => generateRequiredModifier = v != null },
+            { "cg|choiceGroupAttributes", "emit [XmlChoiceGroup] attributes on choice element properties (default is false)", v => generateChoiceGroupAttributes = v != null },
             { "ar|useArrayItemAttribute", "use ArrayItemAttribute for sequences with single elements (default is true)", v => useArrayItemAttribute = v != null },
             { "es|enumAsString", "Use string instead of enum for enumeration", v => enumAsString = v != null },
             { "dmb|disableMergeRestrictionsWithBase", "Disable merging of simple type restrictions with base type restrictions", v => disableMergeRestrictionsWithBase = v != null },
@@ -272,6 +274,7 @@ with or without backing field initialization for collections
             EnableNullableReferenceAttributes = nullableReferenceAttributes,
             EnableNullableDirective = enableNullableDirective,
             GenerateRequiredModifier = generateRequiredModifier,
+            GenerateChoiceGroupAttributes = generateChoiceGroupAttributes,
             GenerateCommandLineArgumentsComment = generateCommandLineArgs,
             UseArrayItemAttribute = useArrayItemAttribute,
             EnumAsString = enumAsString,

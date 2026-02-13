@@ -1,4 +1,4 @@
-﻿using Microsoft.CSharp;
+using Microsoft.CSharp;
 
 using System;
 using System.CodeDom;
@@ -415,7 +415,8 @@ namespace XmlSchemaClassGenerator
             ("System.Linq", c => c.EnableDataBinding),
             ("System.Xml", c => c.CompactTypeNames),
             ("System.Xml.Schema", c => c.CompactTypeNames),
-            ("System.Xml.Serialization", c => c.CompactTypeNames)
+            ("System.Xml.Serialization", c => c.CompactTypeNames),
+            ("XmlSchemaClassGenerator.Attributes", c => c.GenerateChoiceGroupAttributes)
         ];
 
         public static bool IsUsingNamespace(string namespaceName, GeneratorConfiguration conf)
