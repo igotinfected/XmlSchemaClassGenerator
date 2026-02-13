@@ -400,4 +400,11 @@ public class GeneratorConfiguration
     /// analyzer to enforce mutual exclusivity at compile time. Default is false.
     /// </summary>
     public bool GenerateChoiceGroupAttributes { get; set; }
+
+    /// <summary>
+    /// The namespace in which the generated <c>XmlChoiceGroupAttribute</c> class is placed.
+    /// When set, this value is used directly. When <c>null</c>, falls back to
+    /// <see cref="NamespacePrefix"/> if non-empty, otherwise uses <c>"XmlChoiceGroupAttributes"</c>.
+    /// </summary>
+    public string ChoiceGroupAttributeNamespace { get; set; }
 }

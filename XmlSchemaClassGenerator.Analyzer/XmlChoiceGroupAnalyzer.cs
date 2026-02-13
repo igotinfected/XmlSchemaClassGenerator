@@ -14,7 +14,7 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
 {
     public const string DiagnosticId = "XCGA001";
 
-    private const string AttributeFullName = "XmlSchemaClassGenerator.Attributes.XmlChoiceGroupAttribute";
+    private const string AttributeShortName = "XmlChoiceGroupAttribute";
 
     private static readonly DiagnosticDescriptor Rule = new(
         DiagnosticId,
@@ -56,7 +56,7 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
             if (!(symbolInfo.Symbol is IPropertySymbol property))
                 continue;
 
-            if (TryGetChoiceGroupInfo(property, context.Compilation, out var groupId, out var armId))
+            if (TryGetChoiceGroupInfo(property, out var groupId, out var armId))
             {
                 assignments.Add((property.Name, groupId, armId, assignment.GetLocation()));
             }
@@ -118,7 +118,7 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            if (TryGetChoiceGroupInfo(property, context.Compilation, out var groupId, out var armId))
+            if (TryGetChoiceGroupInfo(property, out var groupId, out var armId))
             {
                 if (!receiverGroups.TryGetValue(receiverSymbol, out var list))
                 {
@@ -209,20 +209,15 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
 
     private static bool TryGetChoiceGroupInfo(
         IPropertySymbol property,
-        Compilation compilation,
         out int groupId,
         out int armId)
     {
         groupId = 0;
         armId = 0;
 
-        var attributeType = compilation.GetTypeByMetadataName(AttributeFullName);
-        if (attributeType == null)
-            return false;
-
         foreach (var attr in property.GetAttributes())
         {
-            if (!SymbolEqualityComparer.Default.Equals(attr.AttributeClass, attributeType))
+            if (attr.AttributeClass?.Name != AttributeShortName)
                 continue;
 
             var args = attr.ConstructorArguments;

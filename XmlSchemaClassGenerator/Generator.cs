@@ -396,6 +396,12 @@ public class Generator
         set { _configuration.GenerateChoiceGroupAttributes = value; }
     }
 
+    public string ChoiceGroupAttributeNamespace
+    {
+        get { return _configuration.ChoiceGroupAttributeNamespace; }
+        set { _configuration.ChoiceGroupAttributeNamespace = value; }
+    }
+
     public bool ValidationError { get; private set; }
 
     static Generator()

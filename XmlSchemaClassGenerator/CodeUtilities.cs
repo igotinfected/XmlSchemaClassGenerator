@@ -416,7 +416,7 @@ namespace XmlSchemaClassGenerator
             ("System.Xml", c => c.CompactTypeNames),
             ("System.Xml.Schema", c => c.CompactTypeNames),
             ("System.Xml.Serialization", c => c.CompactTypeNames),
-            ("XmlSchemaClassGenerator.Attributes", c => c.GenerateChoiceGroupAttributes)
+            // Choice group attribute namespace is handled dynamically via ModelBuilder.GetChoiceGroupAttributeNamespace()
         ];
 
         public static bool IsUsingNamespace(string namespaceName, GeneratorConfiguration conf)

@@ -746,9 +746,7 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
         if (ChoiceGroupId.HasValue && Configuration.GenerateChoiceGroupAttributes)
         {
-            var attrTypeRef = CodeUtilities.IsUsingNamespace("XmlSchemaClassGenerator.Attributes", Configuration)
-                ? new CodeTypeReference("XmlChoiceGroupAttribute")
-                : new CodeTypeReference("XmlSchemaClassGenerator.Attributes.XmlChoiceGroupAttribute");
+            var attrTypeRef = new CodeTypeReference("XmlChoiceGroupAttribute");
             var choiceAttr = new CodeAttributeDeclaration(
                 attrTypeRef,
                 new CodeAttributeArgument(new CodePrimitiveExpression(ChoiceGroupId.Value)),

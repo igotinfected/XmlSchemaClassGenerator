@@ -12,8 +12,10 @@ public class XmlChoiceGroupAnalyzerTests
 {
     // The attribute source is provided as a separate file so that the using directive
     // in the test source doesn't conflict with the namespace declaration order.
+    // The namespace is intentionally different from the original to verify that the
+    // analyzer matches by short name, not by fully-qualified name.
     private const string AttributeSource = @"
-namespace XmlSchemaClassGenerator.Attributes
+namespace TestModels
 {
     [System.AttributeUsage(System.AttributeTargets.Property, AllowMultiple = false)]
     public sealed class XmlChoiceGroupAttribute : System.Attribute
@@ -51,7 +53,7 @@ namespace XmlSchemaClassGenerator.Attributes
     public async Task ObjectInitializer_ConflictingArms_Reports()
     {
         var source = @"
-using XmlSchemaClassGenerator.Attributes;
+using TestModels;
 
 public class MyType
 {
@@ -87,7 +89,7 @@ public class Program
     public async Task ObjectInitializer_SameArm_NoDiagnostic()
     {
         var source = @"
-using XmlSchemaClassGenerator.Attributes;
+using TestModels;
 
 public class MyType
 {
@@ -119,7 +121,7 @@ public class Program
     public async Task ObjectInitializer_DifferentGroups_NoDiagnostic()
     {
         var source = @"
-using XmlSchemaClassGenerator.Attributes;
+using TestModels;
 
 public class MyType
 {
@@ -178,7 +180,7 @@ public class Program
     public async Task ObjectInitializer_ThreeArmsConflict_ReportsTwo()
     {
         var source = @"
-using XmlSchemaClassGenerator.Attributes;
+using TestModels;
 
 public class MyType
 {
@@ -224,7 +226,7 @@ public class Program
     public async Task BlockAssignment_ConflictingArms_Reports()
     {
         var source = @"
-using XmlSchemaClassGenerator.Attributes;
+using TestModels;
 
 public class MyType
 {
@@ -258,7 +260,7 @@ public class Program
     public async Task BlockAssignment_SameArm_NoDiagnostic()
     {
         var source = @"
-using XmlSchemaClassGenerator.Attributes;
+using TestModels;
 
 public class MyType
 {
@@ -288,7 +290,7 @@ public class Program
     public async Task BlockAssignment_BrokenByNonAssignment_NoDiagnostic()
     {
         var source = @"
-using XmlSchemaClassGenerator.Attributes;
+using TestModels;
 
 public class MyType
 {
@@ -319,7 +321,7 @@ public class Program
     public async Task BlockAssignment_DifferentReceivers_NoDiagnostic()
     {
         var source = @"
-using XmlSchemaClassGenerator.Attributes;
+using TestModels;
 
 public class MyType
 {
@@ -352,7 +354,7 @@ public class Program
         // Simulates LocationStructure: Longitude(0) + Latitude(0) are same arm,
         // Coordinates(1) is a different arm.
         var source = @"
-using XmlSchemaClassGenerator.Attributes;
+using TestModels;
 
 public class LocationStructure
 {
@@ -393,7 +395,7 @@ public class Program
     {
         // Two independent choice groups on same type; only group 1 has a conflict.
         var source = @"
-using XmlSchemaClassGenerator.Attributes;
+using TestModels;
 
 public class MyType
 {

@@ -1265,9 +1265,9 @@ internal class ModelBuilder
             yield return NamespaceModel.Generate(nhi.FullName, nhi.Models, _configuration);
     }
 
-    private static CodeNamespace GenerateChoiceGroupAttributeNamespace()
+    private CodeNamespace GenerateChoiceGroupAttributeNamespace()
     {
-        var ns = new CodeNamespace("XmlSchemaClassGenerator.Attributes");
+        var ns = new CodeNamespace(GetChoiceGroupAttributeNamespace(_configuration));
         ns.Imports.Add(new CodeNamespaceImport("System"));
 
         // [AttributeUsage(AttributeTargets.Property, AllowMultiple = false)]
@@ -1346,6 +1346,16 @@ internal class ModelBuilder
 
         ns.Types.Add(attrClass);
         return ns;
+    }
+
+    internal static string GetChoiceGroupAttributeNamespace(GeneratorConfiguration configuration)
+    {
+        if (!string.IsNullOrEmpty(configuration.ChoiceGroupAttributeNamespace))
+            return configuration.ChoiceGroupAttributeNamespace;
+
+        return string.IsNullOrEmpty(configuration.NamespacePrefix)
+            ? "XmlChoiceGroupAttributes"
+            : configuration.NamespacePrefix;
     }
 
     private string BuildNamespace(Uri source, string xmlNamespace)
