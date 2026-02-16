@@ -259,14 +259,15 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
             Name = Name,
             Type = typeReference,
             HasGet = true,
-            HasSet = !isPrivateSetter
+            HasSet = !isPrivateSetter && !(FixedValue != null && Configuration.GenerateStrictFixedValues)
         };
 
         if (DefaultValue != null && !IsRequired)
         {
             var defaultValueExpression = propertyType.GetDefaultValueFor(DefaultValue, IsAttribute);
 
-            if ((defaultValueExpression is CodePrimitiveExpression or CodeFieldReferenceExpression) && !CodeUtilities.IsXmlLangOrSpace(XmlSchemaName))
+            if ((defaultValueExpression is CodePrimitiveExpression or CodeFieldReferenceExpression) && !CodeUtilities.IsXmlLangOrSpace(XmlSchemaName)
+                && !(IsNullableReferenceType && Configuration.EnableNullableDirective))
             {
                 var defaultValueAttribute = CreateDefaultValueAttribute(typeReference, defaultValueExpression);
                 member.CustomAttributes.Add(defaultValueAttribute);
@@ -293,8 +294,13 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
         CodeAttributeDeclaration ignoreAttribute = new(TypeRef<XmlIgnoreAttribute>());
         CodeAttributeDeclaration notMappedAttribute = new(CodeUtilities.CreateTypeReference(Attributes.NotMapped, Configuration));
 
+        // When strict fixed values is on and this property has a fixed value,
+        // we always need a backing field to hold the initialized value, even if
+        // DefaultValue is null (which is the case for optional fixed elements).
+        var needsStrictFixed = FixedValue != null && Configuration.GenerateStrictFixedValues;
+
         CodeMemberField backingField = null;
-        if (withDataBinding || DefaultValue != null || isEnumerable)
+        if (withDataBinding || DefaultValue != null || isEnumerable || needsStrictFixed)
         {
             backingField = IsNillableValueType
                 ? new CodeMemberField(NullableTypeRef(typeReference), OwningType.GetUniqueFieldName(this))
@@ -303,7 +309,25 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
             typeDeclaration.Members.Add(backingField);
         }
 
-        if (DefaultValue == null || isEnumerable)
+        if (needsStrictFixed)
+        {
+            // Fixed value under strict mode: emit a getter-only property initialized
+            // to the fixed value. Callers cannot overwrite it at compile time.
+            // XmlSerializer will still serialize it (reads the getter) but silently
+            // skips it during deserialization (no setter).
+            var fixedExpression = propertyType.GetDefaultValueFor(FixedValue, IsAttribute);
+            backingField.InitExpression = fixedExpression;
+
+            member.Type = IsNillableValueType ? NullableTypeRef(typeReference) : typeReference;
+            member.Name += CodeUtilities.NormalizeNewlines($@"
+        {{
+            get
+            {{
+                return {backingField.Name};
+            }}
+        }}");
+        }
+        else if (DefaultValue == null || isEnumerable)
         {
             if (isNullableValueType && Configuration.GenerateNullables && !(Configuration.UseShouldSerializePattern && !IsAttribute))
                 member.Name += Value;
@@ -348,14 +372,16 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
             member.Name += GetAccessors(backingField, withDataBinding, propertyType.GetPropertyValueTypeCode());
 
-            if (!IsRequired && (defaultValueExpression is CodePrimitiveExpression or CodeFieldReferenceExpression) && !CodeUtilities.IsXmlLangOrSpace(XmlSchemaName))
+            if (!IsRequired && (defaultValueExpression is CodePrimitiveExpression or CodeFieldReferenceExpression) && !CodeUtilities.IsXmlLangOrSpace(XmlSchemaName)
+                && !(IsNullableReferenceType && Configuration.EnableNullableDirective))
                 member.CustomAttributes.Add(CreateDefaultValueAttribute(typeReference, defaultValueExpression));
         }
 
         // Emit the C# 11 'required' modifier for required properties.
         // CodeDom renders a CodeMemberField as: <access> <type> <name>;
         // By prepending "required " to the type name we get: public required <type> <name> { get; set; }
-        if (IsRequired && !IsEnumerable && Configuration.GenerateRequiredModifier)
+        // Skip for strict fixed values — read-only properties cannot be 'required'.
+        if (IsRequired && !IsEnumerable && Configuration.GenerateRequiredModifier && !needsStrictFixed)
         {
             // Clone the type reference so we don't also modify the backing field's type
             // (member.Type may be the same object as backingField.Type when both point to typeReference).
@@ -369,7 +395,8 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
         // Emit [Required] for DataAnnotations validation unless the C# 11 'required'
         // modifier is active, which provides strictly stronger compile-time enforcement.
-        if (IsRequired && Configuration.DataAnnotationMode != DataAnnotationMode.None && !Configuration.GenerateRequiredModifier)
+        // Skip for strict fixed values — the value is immutable, so requiring it is meaningless.
+        if (IsRequired && Configuration.DataAnnotationMode != DataAnnotationMode.None && !Configuration.GenerateRequiredModifier && !needsStrictFixed)
         {
             var requiredAttribute = new CodeAttributeDeclaration(CodeUtilities.CreateTypeReference(Attributes.Required, Configuration));
             var noEmptyStrings = propertyType is SimpleModel simpleModel

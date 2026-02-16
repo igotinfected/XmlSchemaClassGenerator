@@ -402,9 +402,55 @@ public class GeneratorConfiguration
     public bool GenerateChoiceGroupAttributes { get; set; }
 
     /// <summary>
+    /// When enabled, properties whose XSD element or attribute has a <c>fixed</c> value are
+    /// generated as read-only (getter-only) properties initialized to the fixed value.
+    /// This prevents callers from accidentally overwriting the value at compile time.
+    /// XmlSerializer will still serialize the fixed value (it reads the getter) but will
+    /// silently skip it during deserialization (no setter). Default is false.
+    /// </summary>
+    public bool GenerateStrictFixedValues { get; set; }
+
+    /// <summary>
+    /// When enabled, a <c>[Range]</c> attribute is emitted even when only one bound
+    /// (<c>minInclusive</c> or <c>maxInclusive</c>) is specified in the XSD restriction.
+    /// The missing bound is filled in with the CLR type's minimum or maximum value.
+    /// Without this flag, both bounds must be present for <c>[Range]</c> to be emitted.
+    /// Default is false.
+    /// </summary>
+    public bool GenerateStrictRangeBounds { get; set; }
+
+    /// <summary>
     /// The namespace in which the generated <c>XmlChoiceGroupAttribute</c> class is placed.
     /// When set, this value is used directly. When <c>null</c>, falls back to
     /// <see cref="NamespacePrefix"/> if non-empty, otherwise uses <c>"XmlChoiceGroupAttributes"</c>.
     /// </summary>
     public string ChoiceGroupAttributeNamespace { get; set; }
+
+    private bool _generateStrict;
+
+    /// <summary>
+    /// Convenience flag that enables all strict compile-time enforcement options at once:
+    /// <see cref="EnableNullableDirective"/>, <see cref="GenerateRequiredModifier"/>,
+    /// <see cref="GenerateChoiceGroupAttributes"/>, <see cref="EnumCollection"/>,
+    /// <see cref="GenerateStrictFixedValues"/>, and <see cref="GenerateStrictRangeBounds"/>.
+    /// <para>
+    /// Individual flags set <em>after</em> this property override it, e.g. on the CLI
+    /// <c>--strict --rm-</c> enables everything except <see cref="GenerateRequiredModifier"/>.
+    /// </para>
+    /// Default is false.
+    /// </summary>
+    public bool GenerateStrict
+    {
+        get => _generateStrict;
+        set
+        {
+            _generateStrict = value;
+            EnableNullableDirective = value;
+            GenerateRequiredModifier = value;
+            GenerateChoiceGroupAttributes = value;
+            EnumCollection = value;
+            GenerateStrictFixedValues = value;
+            GenerateStrictRangeBounds = value;
+        }
+    }
 }

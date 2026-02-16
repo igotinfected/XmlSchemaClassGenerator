@@ -65,6 +65,8 @@ public class XmlTests(ITestOutputHelper output)
             EnableNullableDirective = generatorPrototype.EnableNullableDirective,
             GenerateRequiredModifier = generatorPrototype.GenerateRequiredModifier,
             GenerateChoiceGroupAttributes = generatorPrototype.GenerateChoiceGroupAttributes,
+            GenerateStrictFixedValues = generatorPrototype.GenerateStrictFixedValues,
+            GenerateStrictRangeBounds = generatorPrototype.GenerateStrictRangeBounds,
         };
 
         gen.CommentLanguages.Clear();
@@ -4659,6 +4661,450 @@ namespace Test
         Assert.Contains("class XmlChoiceGroupAttribute", content);
         Assert.Contains("public int GroupId", content);
         Assert.Contains("public int ArmId", content);
+    }
+
+    // -- GenerateStrictFixedValues tests ----------------
+
+    private const string FixedValueXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""Normal"" type=""xs:string"" minOccurs=""0""/>
+            <xs:element name=""DefaultVal"" type=""xs:string"" default=""hello"" minOccurs=""0""/>
+            <xs:element name=""FixedVal"" type=""xs:string"" fixed=""constant"" minOccurs=""0""/>
+            <xs:element name=""FixedInt"" type=""xs:int"" fixed=""42"" minOccurs=""0""/>
+        </xs:sequence>
+        <xs:attribute name=""Version"" type=""xs:string"" fixed=""1.0""/>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestFixedValueWithoutStrictHasSetter()
+    {
+        // Without strict fixed values, properties with fixed values should have setters.
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictFixedValues = false,
+        };
+        var contents = ConvertXml(nameof(TestFixedValueWithoutStrictHasSetter), FixedValueXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // FixedVal should have get and set
+        Assert.Contains("get", content);
+        Assert.Matches(@"FixedVal[^}]*\bset\b", content);
+    }
+
+    [Fact]
+    public void TestFixedValueWithStrictIsReadOnly()
+    {
+        // With strict fixed values, properties with fixed values should be getter-only.
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictFixedValues = true,
+        };
+        var contents = ConvertXml(nameof(TestFixedValueWithStrictIsReadOnly), FixedValueXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // FixedVal and FixedInt should NOT have setters
+        var fixedValBlock = ExtractPropertyBlock(content, "FixedVal");
+        Assert.Contains("get", fixedValBlock);
+        Assert.DoesNotContain("set", fixedValBlock);
+
+        var fixedIntBlock = ExtractPropertyBlock(content, "FixedInt");
+        Assert.Contains("get", fixedIntBlock);
+        Assert.DoesNotContain("set", fixedIntBlock);
+
+        var versionBlock = ExtractPropertyBlock(content, "Version");
+        Assert.Contains("get", versionBlock);
+        Assert.DoesNotContain("set", versionBlock);
+
+        // DefaultVal should still have a setter (it has a default, not a fixed value)
+        var defaultBlock = ExtractPropertyBlock(content, "DefaultVal");
+        Assert.Contains("get", defaultBlock);
+        Assert.Contains("set", defaultBlock);
+
+        // Normal should still have a setter
+        var normalBlock = ExtractPropertyBlock(content, "Normal");
+        Assert.Contains("set", normalBlock);
+    }
+
+    [Fact]
+    public void TestFixedValueWithStrictCompiles()
+    {
+        // The generated code with strict fixed values should compile successfully.
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictFixedValues = true,
+        };
+        var contents = ConvertXml(nameof(TestFixedValueWithStrictCompiles), FixedValueXsd, generator).ToArray();
+        var assembly = Compiler.Compile(nameof(TestFixedValueWithStrictCompiles), contents);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+
+        // FixedVal property should exist and have no setter
+        var fixedValProp = rootType.GetProperty("FixedVal");
+        Assert.NotNull(fixedValProp);
+        Assert.True(fixedValProp.CanRead);
+        Assert.False(fixedValProp.CanWrite);
+
+        // FixedInt property should exist and have no setter
+        var fixedIntProp = rootType.GetProperty("FixedInt");
+        Assert.NotNull(fixedIntProp);
+        Assert.True(fixedIntProp.CanRead);
+        Assert.False(fixedIntProp.CanWrite);
+
+        // Version attribute should exist and have no setter
+        var versionProp = rootType.GetProperty("Version");
+        Assert.NotNull(versionProp);
+        Assert.True(versionProp.CanRead);
+        Assert.False(versionProp.CanWrite);
+
+        // DefaultVal should still have a setter
+        var defaultProp = rootType.GetProperty("DefaultVal");
+        Assert.NotNull(defaultProp);
+        Assert.True(defaultProp.CanRead);
+        Assert.True(defaultProp.CanWrite);
+
+        // Verify the fixed value is correct via a default instance
+        var instance = Activator.CreateInstance(rootType);
+        Assert.Equal("constant", fixedValProp.GetValue(instance));
+        Assert.Equal(42, fixedIntProp.GetValue(instance));
+        Assert.Equal("1.0", versionProp.GetValue(instance));
+    }
+
+    /// <summary>
+    /// Extracts the property block (from the property type through its closing brace)
+    /// for a given property name from generated C# source.
+    /// </summary>
+    private static string ExtractPropertyBlock(string source, string propertyName)
+    {
+        // Match pattern: anything up to and including the property name, then capture
+        // until the next property or end of class. Properties in the CodeDom hack are
+        // CodeMemberFields whose Name includes the accessor block.
+        var idx = source.IndexOf(propertyName);
+        if (idx < 0) return string.Empty;
+
+        // Walk forward to find the balanced braces for the property accessors
+        var start = idx;
+        int braceCount = 0;
+        bool inBraces = false;
+        for (int i = idx; i < source.Length; i++)
+        {
+            if (source[i] == '{') { braceCount++; inBraces = true; }
+            if (source[i] == '}') { braceCount--; }
+            if (inBraces && braceCount == 0)
+                return source.Substring(start, i - start + 1);
+        }
+        return source.Substring(start);
+    }
+
+    // -- GenerateStrictRangeBounds tests ----------------
+
+    private const string SoloRangeBoundsXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:simpleType name=""PercentageType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:minInclusive value=""0""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:simpleType name=""BoundedType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:minInclusive value=""0""/>
+            <xs:maxInclusive value=""100""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:simpleType name=""CappedType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:maxInclusive value=""999""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""Pct"" type=""PercentageType""/>
+            <xs:element name=""Bounded"" type=""BoundedType""/>
+            <xs:element name=""Capped"" type=""CappedType""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestSoloRangeBoundsWithoutStrictNoRange()
+    {
+        // Without strict range bounds, solo minInclusive should NOT produce a [Range] attribute.
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = false,
+        };
+        var contents = ConvertXml(nameof(TestSoloRangeBoundsWithoutStrictNoRange), SoloRangeBoundsXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // BoundedType (both bounds) should still produce a [Range]
+        Assert.Contains(@"RangeAttribute(typeof(decimal)", content);
+
+        // Count total [Range] attributes — should be exactly 1 (only BoundedType)
+        var rangeCount = System.Text.RegularExpressions.Regex.Matches(content, @"RangeAttribute\(typeof").Count;
+        Assert.Equal(1, rangeCount);
+    }
+
+    [Fact]
+    public void TestSoloRangeBoundsWithStrictEmitsRange()
+    {
+        // With strict range bounds, solo minInclusive should produce a [Range] attribute
+        // with the type's maximum as the upper bound.
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = true,
+        };
+        var contents = ConvertXml(nameof(TestSoloRangeBoundsWithStrictEmitsRange), SoloRangeBoundsXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Should have 3 [Range] attributes total (Percentage, Bounded, Capped)
+        var rangeCount = System.Text.RegularExpressions.Regex.Matches(content, @"RangeAttribute\(typeof").Count;
+        Assert.Equal(3, rangeCount);
+
+        // PercentageType (solo minInclusive=0) should include "0" as min bound
+        Assert.Contains(@"""0""", content);
+
+        // CappedType (solo maxInclusive=999) should include "999" as max bound
+        Assert.Contains(@"""999""", content);
+    }
+
+    [Fact]
+    public void TestSoloRangeBoundsWithStrictCompiles()
+    {
+        // The generated code with strict range bounds should compile successfully.
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = true,
+        };
+        var contents = ConvertXml(nameof(TestSoloRangeBoundsWithStrictCompiles), SoloRangeBoundsXsd, generator).ToArray();
+        var assembly = Compiler.Compile(nameof(TestSoloRangeBoundsWithStrictCompiles), contents);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+
+        // Pct property should have a [Range] attribute
+        var pctProp = rootType.GetProperty("Pct");
+        Assert.NotNull(pctProp);
+        var rangeAttr = pctProp.GetCustomAttributes(typeof(System.ComponentModel.DataAnnotations.RangeAttribute), false);
+        Assert.Single(rangeAttr);
+    }
+
+    // -- totalDigits/fractionDigits → Range tests ----------------
+
+    private const string DigitsRangeXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:simpleType name=""ThreeDigitType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:totalDigits value=""3""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:simpleType name=""FiveDigitTwoFractionType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:totalDigits value=""5""/>
+            <xs:fractionDigits value=""2""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:simpleType name=""ExplicitBoundsType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:totalDigits value=""3""/>
+            <xs:minInclusive value=""0""/>
+            <xs:maxInclusive value=""100""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""ThreeDigit"" type=""ThreeDigitType""/>
+            <xs:element name=""FiveTwo"" type=""FiveDigitTwoFractionType""/>
+            <xs:element name=""Explicit"" type=""ExplicitBoundsType""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestTotalDigitsRangeWithoutStrictNoRange()
+    {
+        // Without strict, totalDigits should NOT produce a [Range].
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = false,
+        };
+        var contents = ConvertXml(nameof(TestTotalDigitsRangeWithoutStrictNoRange), DigitsRangeXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Only ExplicitBoundsType should produce a [Range] (both bounds present)
+        var rangeCount = System.Text.RegularExpressions.Regex.Matches(content, @"RangeAttribute\(typeof").Count;
+        Assert.Equal(1, rangeCount);
+    }
+
+    [Fact]
+    public void TestTotalDigitsRangeWithStrictEmitsRange()
+    {
+        // With strict, totalDigits=3 should produce [Range(-999, 999)].
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = true,
+        };
+        var contents = ConvertXml(nameof(TestTotalDigitsRangeWithStrictEmitsRange), DigitsRangeXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // ThreeDigitType: totalDigits=3 → [-999, 999]
+        Assert.Contains(@"""-999""", content);
+        Assert.Contains(@"""999""", content);
+
+        // FiveDigitTwoFractionType: totalDigits=5, fractionDigits=2 → [-999.99, 999.99]
+        Assert.Contains(@"""-999.99""", content);
+        Assert.Contains(@"""999.99""", content);
+
+        // Should have 3 [Range] attributes: ThreeDigit, FiveTwo, Explicit
+        var rangeCount = System.Text.RegularExpressions.Regex.Matches(content, @"RangeAttribute\(typeof").Count;
+        Assert.Equal(3, rangeCount);
+    }
+
+    [Fact]
+    public void TestTotalDigitsExplicitBoundsOverrideDigits()
+    {
+        // When explicit bounds are present, totalDigits should NOT produce an additional [Range].
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = true,
+        };
+        var contents = ConvertXml(nameof(TestTotalDigitsExplicitBoundsOverrideDigits), DigitsRangeXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // ExplicitBoundsType should have [Range(0, 100)], NOT [Range(-999, 999)]
+        Assert.Contains(@"""0""", content);
+        Assert.Contains(@"""100""", content);
+
+        // Should have exactly 3 ranges (one per type), not 4
+        var rangeCount = System.Text.RegularExpressions.Regex.Matches(content, @"RangeAttribute\(typeof").Count;
+        Assert.Equal(3, rangeCount);
+    }
+
+    [Fact]
+    public void TestTotalDigitsRangeWithStrictCompiles()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = true,
+        };
+        var contents = ConvertXml(nameof(TestTotalDigitsRangeWithStrictCompiles), DigitsRangeXsd, generator).ToArray();
+        var assembly = Compiler.Compile(nameof(TestTotalDigitsRangeWithStrictCompiles), contents);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+
+        // ThreeDigit should have a [Range] attribute with bounds -999..999
+        var prop = rootType.GetProperty("ThreeDigit");
+        Assert.NotNull(prop);
+        var rangeAttrs = prop.GetCustomAttributes(typeof(System.ComponentModel.DataAnnotations.RangeAttribute), false);
+        Assert.Single(rangeAttrs);
+        var range = (System.ComponentModel.DataAnnotations.RangeAttribute)rangeAttrs[0];
+        Assert.Equal("-999", range.Minimum?.ToString());
+        Assert.Equal("999", range.Maximum?.ToString());
+    }
+
+    // -- DefaultValueAttribute suppression for nullable reference types ----------------
+
+    private const string DefaultValueNullableXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:complexType name=""DefaultValueRoot"">
+        <xs:sequence>
+            <xs:element name=""OptionalStringWithDefault"" type=""xs:string"" minOccurs=""0"" default=""hello""/>
+            <xs:element name=""OptionalIntWithDefault"" type=""xs:int"" minOccurs=""0"" default=""42""/>
+            <xs:element name=""RequiredStringWithDefault"" type=""xs:string"" default=""world""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestNullableDirectiveSuppressesDefaultValueAttributeForOptionalString()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            EnableNullableDirective = true,
+            GenerateNullables = true,
+        };
+
+        var contents = ConvertXml(nameof(TestNullableDirectiveSuppressesDefaultValueAttributeForOptionalString), DefaultValueNullableXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.DoesNotContain("DefaultValueAttribute(\"hello\")", content);
+        Assert.Contains("= \"hello\"", content);
+    }
+
+    [Fact]
+    public void TestDefaultValueAttributeStillEmittedWithoutNullableDirective()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            EnableNullableDirective = false,
+            GenerateNullables = true,
+        };
+
+        var contents = ConvertXml(nameof(TestDefaultValueAttributeStillEmittedWithoutNullableDirective), DefaultValueNullableXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.Contains("DefaultValueAttribute(\"hello\")", content);
+    }
+
+    [Fact]
+    public void TestDefaultValueAttributeStillEmittedForValueTypeWithNullableDirective()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            EnableNullableDirective = true,
+            GenerateNullables = true,
+        };
+
+        var contents = ConvertXml(nameof(TestDefaultValueAttributeStillEmittedForValueTypeWithNullableDirective), DefaultValueNullableXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.Contains("DefaultValueAttribute(42)", content);
+    }
+
+    [Fact]
+    public void TestNullableDirectiveDefaultValueCompilationRoundTrip()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            EnableNullableDirective = true,
+            GenerateNullables = true,
+        };
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestNullableDirectiveDefaultValueCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(DefaultValueNullableXsd) });
+
+        var assembly = Compiler.CompileFiles(nameof(TestNullableDirectiveDefaultValueCompilationRoundTrip), output.Files);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.DefaultValueRoot");
+        Assert.NotNull(rootType);
+
+        Assert.NotNull(rootType.GetProperty("OptionalStringWithDefault"));
+        Assert.NotNull(rootType.GetProperty("OptionalIntWithDefault"));
+        Assert.NotNull(rootType.GetProperty("RequiredStringWithDefault"));
     }
 
 }

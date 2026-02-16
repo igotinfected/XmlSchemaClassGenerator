@@ -101,8 +101,12 @@ Append - to option to disable it, e.g. --interface-.
 | `--gc`, `--generatedCodeAttribute` | Add version information to `GeneratedCodeAttribute` (default: true) |
 | `--nc`, `--netCore` | Generate .NET Core specific code that might not work with .NET Framework (default: false) |
 | `--nr`, `--nullableReferenceAttributes` | Generate `[AllowNull]`/`[MaybeNull]` attributes for nullable reference types (default: false) |
+| `--st`, `--strict` | Enable all strict compile-time enforcement options: `--nd`, `--rm`, `--cg`, `--ecl`, `--fv`, `--rb` (default: false). Individual flags placed after `--strict` override it, e.g. `--strict --rm-` |
 | `--nd`, `--nullableDirective` | Emit `#nullable enable` and use native nullable reference type syntax (`string?`) instead of attributes (default: false) |
 | `--rm`, `--requiredModifier` | Emit C# 11 `required` modifier on required properties, replacing `[Required]` attribute (default: false) |
+| `--cg`, `--choiceGroupAttributes` | Emit `[XmlChoiceGroup]` attributes on choice element properties for Roslyn analyzer enforcement (default: false) |
+| `--fv`, `--fixedValues` | Generate read-only (getter-only) properties for fixed-value elements and attributes (default: false) |
+| `--rb`, `--rangeBounds` | Emit `[Range]` even when only one bound (`minInclusive` or `maxInclusive`) is present, filling the missing bound from the CLR type (default: false) |
 | `--ar`, `--useArrayItemAttribute` | Use `ArrayItemAttribute` for sequences with single elements (default: true) |
 | `--es`, `--enumAsString` | Use `string` instead of `enum` for enumerations |
 | `--dmb`, `--disableMergeRestrictionsWithBase` | Disable merging of simple type restrictions with base type restrictions |
@@ -265,18 +269,26 @@ public System.Nullable<int> Id
 }
 ```
 
-Nullable reference types and `required` modifier<a name="nullable-directive"></a>
--------------------------------------------------
+Strict mode and compile-time enforcement<a name="nullable-directive"></a>
+-----------------------------------------
 
-There are three options related to nullable reference types and required properties:
+The `--strict` flag (`--st`) enables all strict compile-time enforcement options at once: `--nd`, `--rm`, `--cg`, `--ecl`, `--fv`, and `--rb`. Individual flags placed **after** `--strict` on the command line override it, e.g. `--strict --rm-` enables everything except the `required` modifier. This is the recommended mode for new projects.
+
+The following options control the individual strict features:
 
 | Option | C# version | What it does |
 | ------ | ---------- | ------------ |
 | `--nr` / `--nullableReferenceAttributes` | C# 8+ | Adds `[AllowNull]` and `[MaybeNull]` attributes to optional reference-type properties |
-| `--nd` / `--nullableDirective` | C# 8+ | Emits `#nullable enable` at the top of each file and uses native `?` syntax (`string?`) instead of attributes |
+| `--nd` / `--nullableDirective` | C# 8+ | Emits `#nullable enable` at the top of each file and uses native `?` syntax (`string?`) instead of attributes. Also suppresses `[DefaultValueAttribute]` for optional nullable reference-type properties (see below) |
 | `--rm` / `--requiredModifier` | C# 11+ | Adds the `required` modifier to properties corresponding to required XSD elements (`minOccurs >= 1`) or attributes (`use="required"`), replacing the `[Required]` attribute |
+| `--cg` / `--choiceGroupAttributes` | Any | Emits `[XmlChoiceGroup(groupId, armId)]` attributes on choice element properties, enabling the companion Roslyn analyzer to enforce mutual exclusivity at compile time |
+| `--ecl` / `--enumCollection` | Any | Generates typed enum collections for `xs:list` types, ensuring enum values are matched exactly during serialization |
+| `--fv` / `--fixedValues` | Any | Generates read-only (getter-only) properties for elements and attributes with `fixed` values, preventing accidental overwrite at compile time |
+| `--rb` / `--rangeBounds` | Any | Emits `[Range]` attributes even when only one bound (`minInclusive`/`maxInclusive`) is specified; the missing bound is filled from the CLR type's min/max. Also considers `minExclusive`/`maxExclusive` bounds |
 
 `--nd` supersedes `--nr`: when `--nd` is active, optional reference-type properties use `string?` directly and the `[AllowNull]`/`[MaybeNull]` attributes are not emitted (except for array types where the `?` suffix cannot be applied through CodeDom). Similarly, `--rm` supersedes `[Required]`: the `required` keyword provides strictly stronger compile-time enforcement, so the `[Required]` attribute is no longer emitted.
+
+`--nd` also suppresses `[DefaultValueAttribute]` for optional nullable reference-type properties. Without this, `XmlSerializer` compares the property value to the `[DefaultValue]` and **omits** the element from the XML when they match -- meaning a property initialized to its default can never serialize that default. Under `#nullable enable`, the nullable contract replaces `[DefaultValue]` for controlling serialization: `null` means the element is absent, and any non-null value (including the default) is serialized. The backing field is still initialized to the XSD default value, so newly constructed objects start with the correct default. Value-type properties are unaffected and continue to use `[DefaultValueAttribute]` normally.
 
 Using `--nd` and `--rm` together gives the strongest compile-time safety: the compiler will warn on uninitialized non-nullable properties and error on missing `required` properties in object initializers.
 

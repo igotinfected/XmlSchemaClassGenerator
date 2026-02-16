@@ -402,6 +402,24 @@ public class Generator
         set { _configuration.ChoiceGroupAttributeNamespace = value; }
     }
 
+    public bool GenerateStrictFixedValues
+    {
+        get { return _configuration.GenerateStrictFixedValues; }
+        set { _configuration.GenerateStrictFixedValues = value; }
+    }
+
+    public bool GenerateStrictRangeBounds
+    {
+        get { return _configuration.GenerateStrictRangeBounds; }
+        set { _configuration.GenerateStrictRangeBounds = value; }
+    }
+
+    public bool GenerateStrict
+    {
+        get { return _configuration.GenerateStrict; }
+        set { _configuration.GenerateStrict = value; }
+    }
+
     public bool ValidationError { get; private set; }
 
     static Generator()
