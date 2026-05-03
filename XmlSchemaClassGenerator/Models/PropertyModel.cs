@@ -27,6 +27,7 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
     // private
     public string OriginalPropertyName { get; private set; }
+    public string RenamedFrom { get; set; }
     public string DefaultValue { get; private set; }
     public string FixedValue { get; private set; }
     public XmlSchemaForm Form { get; private set; }
@@ -220,6 +221,13 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
         }
 
         member.Comments.AddRange(GetComments(docs).ToArray());
+
+        if (RenamedFrom != null)
+        {
+            member.Comments.Add(new CodeCommentStatement("<remarks>", true));
+            member.Comments.Add(new CodeCommentStatement($"This property was renamed from <c>{RenamedFrom}</c> to <c>{Name}</c> to avoid a collision with an existing member.", true));
+            member.Comments.Add(new CodeCommentStatement("</remarks>", true));
+        }
     }
 
     private CodeAttributeDeclaration CreateDefaultValueAttribute(CodeTypeReference typeReference, CodeExpression defaultValueExpression)

@@ -213,6 +213,7 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
         {
             if (Index > 0)
             {
+                Property.RenamedFrom = Property.Name;
                 Property.Name += $"_{Index + 1}";
 
                 if (properties.Any(q => Property.XmlSchemaName == q.Property.XmlSchemaName && q.Index < Index))
@@ -224,18 +225,26 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
 
         if (IsMixed && (BaseClass == null || (BaseClass is ClassModel && !AllBaseClasses.Any(b => b.IsMixed))))
         {
-            var propName = "Text";
-            var propertyIndex = 1;
-
-            // To not collide with any existing members
-            while (Properties.Exists(x => x.Name.Equals(propName, StringComparison.Ordinal)) || propName.Equals(classDeclaration.Name, StringComparison.Ordinal))
-            {
-                propName = $"Text_{propertyIndex}";
-                propertyIndex++;
-            }
+            var propName = GetMixedTextPropertyName();
             // hack to generate automatic property
-            var text = new CodeMemberField(typeof(string[]), propName + PropertyModel.GetAccessors()) { Attributes = MemberAttributes.Public };
+            var text = new CodeMemberField(typeof(string[]), propName + PropertyModel.GetAccessors())
+            {
+                Attributes = MemberAttributes.Public,
+                InitExpression = new CodeArrayCreateExpression(typeof(string), 0),
+            };
             text.CustomAttributes.Add(AttributeDecl<XmlTextAttribute>());
+
+            text.Comments.Add(new CodeCommentStatement("<summary>", true));
+            text.Comments.Add(new CodeCommentStatement("<para>Gets or sets the mixed content text segments of this element.</para>", true));
+            text.Comments.Add(new CodeCommentStatement("</summary>", true));
+
+            if (propName != "Text")
+            {
+                text.Comments.Add(new CodeCommentStatement("<remarks>", true));
+                text.Comments.Add(new CodeCommentStatement($"This property was renamed from <c>Text</c> to <c>{propName}</c> to avoid a collision with an existing member.", true));
+                text.Comments.Add(new CodeCommentStatement("</remarks>", true));
+            }
+
             classDeclaration.Members.Add(text);
 
             var textPropertyModel = new PropertyModel(Configuration, propName, new SimpleModel(Configuration) { ValueType = typeof(string) }, this);
@@ -366,6 +375,40 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
             return new CodeSnippetExpression($"new {reference} {{ {Configuration.TextValuePropertyName} = {val} }};");
         }
 
+        var mixedOwner = GetMixedTextOwner();
+        if (mixedOwner != null)
+        {
+            var reference = GenerateCSharpCodeFromExpression(new CodeTypeReferenceExpression(GetReferenceFor(referencingNamespace: null)));
+            var val = GenerateCSharpCodeFromExpression(new CodePrimitiveExpression(defaultString));
+            var textPropName = mixedOwner.GetMixedTextPropertyName();
+
+            return new CodeSnippetExpression($"new {reference} {{ {textPropName} = new string[] {{ {val} }} }};");
+        }
+
         return base.GetDefaultValueFor(defaultString, attribute);
+    }
+
+    private ClassModel GetMixedTextOwner()
+    {
+        if (IsMixed && (BaseClass == null || (BaseClass is ClassModel && !AllBaseClasses.Any(b => b.IsMixed))))
+        {
+            return this;
+        }
+
+        return AllBaseClasses.FirstOrDefault(b => b.IsMixed && (b.BaseClass == null || (b.BaseClass is ClassModel && !b.AllBaseClasses.Any(bb => bb.IsMixed))));
+    }
+
+    private string GetMixedTextPropertyName()
+    {
+        var propName = "Text";
+        var propertyIndex = 1;
+
+        while (Properties.Exists(x => x.Name.Equals(propName, StringComparison.Ordinal)) || propName.Equals(Name, StringComparison.Ordinal))
+        {
+            propName = $"Text_{propertyIndex}";
+            propertyIndex++;
+        }
+
+        return propName;
     }
 }

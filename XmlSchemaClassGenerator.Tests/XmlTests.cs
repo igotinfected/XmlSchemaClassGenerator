@@ -5107,4 +5107,179 @@ namespace Test
         Assert.NotNull(rootType.GetProperty("RequiredStringWithDefault"));
     }
 
+    private const string MixedContentDefaultValueXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:complexType name=""MixedStringType"" mixed=""true"">
+        <xs:sequence>
+            <xs:element name=""Sub"" type=""xs:string"" minOccurs=""0""/>
+        </xs:sequence>
+        <xs:attribute name=""lang"" type=""xs:language""/>
+    </xs:complexType>
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""Label"" type=""MixedStringType"" default=""hello"" minOccurs=""0""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestMixedContentTypeWithDefaultValueGeneratesCode()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+        };
+
+        var contents = ConvertXml(nameof(TestMixedContentTypeWithDefaultValueGeneratesCode), MixedContentDefaultValueXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.Contains("MixedStringType", content);
+        Assert.Contains("Label", content);
+        Assert.Contains("Text = new string[] { \"hello\" }", content);
+    }
+
+    [Fact]
+    public void TestMixedContentTypeWithDefaultValueCompilationRoundTrip()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+        };
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestMixedContentTypeWithDefaultValueCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(MixedContentDefaultValueXsd) });
+
+        var assembly = Compiler.CompileFiles(nameof(TestMixedContentTypeWithDefaultValueCompilationRoundTrip), output.Files);
+        Assert.NotNull(assembly);
+
+        var mixedType = assembly.GetType("Test.MixedStringType");
+        Assert.NotNull(mixedType);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+        Assert.NotNull(rootType.GetProperty("Label"));
+    }
+
+    private const string SimpleContentRestrictionDefaultValueXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:complexType name=""BaseRefStructure"">
+        <xs:simpleContent>
+            <xs:extension base=""xs:normalizedString"">
+                <xs:attribute name=""ref"" type=""xs:string"" use=""required""/>
+            </xs:extension>
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:complexType name=""DerivedRefStructure"">
+        <xs:simpleContent>
+            <xs:restriction base=""BaseRefStructure"">
+                <xs:attribute name=""ref"" type=""xs:string"" use=""required""/>
+            </xs:restriction>
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""DerivedRef"" type=""DerivedRefStructure"" default=""false"" minOccurs=""0""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestSimpleContentRestrictionWithDefaultValueGeneratesCode()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+        };
+
+        var contents = ConvertXml(nameof(TestSimpleContentRestrictionWithDefaultValueGeneratesCode), SimpleContentRestrictionDefaultValueXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.Contains("DerivedRefStructure", content);
+        Assert.Contains("= \"false\"", content);
+    }
+
+    [Fact]
+    public void TestSimpleContentRestrictionWithDefaultValueCompilationRoundTrip()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+        };
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestSimpleContentRestrictionWithDefaultValueCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(SimpleContentRestrictionDefaultValueXsd) });
+
+        var assembly = Compiler.CompileFiles(nameof(TestSimpleContentRestrictionWithDefaultValueCompilationRoundTrip), output.Files);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+        Assert.NotNull(rootType.GetProperty("DerivedRef"));
+    }
+
+    private const string SimpleContentExtensionDefaultValueXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:complexType name=""MultilingualString"">
+        <xs:simpleContent>
+            <xs:extension base=""xs:normalizedString"">
+                <xs:attribute name=""lang"" type=""xs:language""/>
+            </xs:extension>
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""Note"" type=""MultilingualString"" default=""false."" minOccurs=""0""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestSimpleContentExtensionWithDefaultValueGeneratesCode()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+        };
+
+        var contents = ConvertXml(nameof(TestSimpleContentExtensionWithDefaultValueGeneratesCode), SimpleContentExtensionDefaultValueXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.Contains("MultilingualString", content);
+        Assert.Contains("= \"false.\"", content);
+    }
+
+    [Fact]
+    public void TestSimpleContentExtensionWithDefaultValueCompilationRoundTrip()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+        };
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestSimpleContentExtensionWithDefaultValueCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(SimpleContentExtensionDefaultValueXsd) });
+
+        var assembly = Compiler.CompileFiles(nameof(TestSimpleContentExtensionWithDefaultValueCompilationRoundTrip), output.Files);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+        Assert.NotNull(rootType.GetProperty("Note"));
+    }
+
 }
