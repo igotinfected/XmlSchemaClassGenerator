@@ -4454,7 +4454,63 @@ namespace Test
         </xs:sequence>
     </xs:complexType>
 
-    <!-- Case 7: No choice (control — should have no attributes) -->
+    <!-- Case 7: Choice inside sequence inside choice where inner properties also belong to the outer arm -->
+    <xs:complexType name=""NestedChoiceMemberships"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:sequence>
+                    <xs:choice>
+                        <xs:element name=""NestedInnerX"" type=""xs:string""/>
+                        <xs:element name=""NestedInnerY"" type=""xs:string""/>
+                    </xs:choice>
+                    <xs:element name=""NestedExtra"" type=""xs:string""/>
+                </xs:sequence>
+                <xs:element name=""NestedStandalone"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 8: Optional choice group should emit non-required metadata -->
+    <xs:complexType name=""OptionalChoice"">
+        <xs:sequence>
+            <xs:choice minOccurs=""0"">
+                <xs:element name=""OptionalAlpha"" type=""xs:string""/>
+                <xs:element name=""OptionalBeta"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 9: Optional parent sequence with required choice should emit non-required metadata -->
+    <xs:complexType name=""OptionalParentRequiredChoice"">
+        <xs:sequence minOccurs=""0"">
+            <xs:choice>
+                <xs:element name=""ParentOptionalAlpha"" type=""xs:string""/>
+                <xs:element name=""ParentOptionalBeta"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 10: Required group ref reached through an optional outer choice -->
+    <xs:group name=""OptionalOuterChoiceGroupRefGroup"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:element name=""GroupNestedAlpha"" type=""xs:string""/>
+                <xs:element name=""GroupNestedBeta"" type=""xs:string""/>
+            </xs:choice>
+            <xs:element name=""GroupNestedExtra"" type=""xs:string""/>
+        </xs:sequence>
+    </xs:group>
+
+    <xs:complexType name=""OptionalOuterChoiceRequiredGroupRef"">
+        <xs:sequence>
+            <xs:choice minOccurs=""0"">
+                <xs:group ref=""OptionalOuterChoiceGroupRefGroup""/>
+                <xs:element name=""GroupRefStandalone"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 11: No choice (control — should have no attributes) -->
     <xs:complexType name=""NoChoice"">
         <xs:sequence>
             <xs:element name=""Foo"" type=""xs:string""/>
@@ -4484,8 +4540,8 @@ namespace Test
         var block = ExtractClassBlock(content, "SimpleChoice");
 
         // Count and Percentage should have XmlChoiceGroup attributes with same groupId, different armIds.
-        Assert.Matches(@"XmlChoiceGroupAttribute\(\d+, 0\).*Count", block.Replace("\n", " "));
-        Assert.Matches(@"XmlChoiceGroupAttribute\(\d+, 1\).*Percentage", block.Replace("\n", " "));
+        Assert.Matches(@"XmlChoiceGroupAttribute\(\d+, 0, IsRequired=true\).*Count", block.Replace("\n", " "));
+        Assert.Matches(@"XmlChoiceGroupAttribute\(\d+, 1, IsRequired=true\).*Percentage", block.Replace("\n", " "));
 
         // Name is not in a choice — should NOT have the attribute.
         var nameLines = block.Split('\n').Where(l => l.Contains("\"Name\"") || l.Contains("Name {")).ToList();
@@ -4501,7 +4557,7 @@ namespace Test
         var block = ExtractClassBlock(content, "MultipleChoices");
 
         // Extract all XmlChoiceGroupAttribute occurrences.
-        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+)\)");
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+), IsRequired=(?:true|false)\)");
         Assert.Equal(4, matches.Count); // Alpha, Beta, Gamma, Delta
 
         var groupIds = matches.Select(m => int.Parse(m.Groups[1].Value)).Distinct().ToList();
@@ -4528,7 +4584,7 @@ namespace Test
         var content = string.Join("\n", contents);
         var block = ExtractClassBlock(content, "ChoiceWithSequence");
 
-        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+)\)");
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+), IsRequired=(?:true|false)\)");
         Assert.Equal(3, matches.Count); // Simple, PartA, PartB
 
         // All should share the same groupId.
@@ -4561,7 +4617,7 @@ namespace Test
         var content = string.Join("\n", contents);
         var block = ExtractClassBlock(content, "BothArmsSequences");
 
-        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+)\)");
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+), IsRequired=(?:true|false)\)");
         Assert.Equal(4, matches.Count); // StartRef, StartName, EndRef, EndName
 
         // All share the same groupId.
@@ -4587,7 +4643,7 @@ namespace Test
         var content = string.Join("\n", contents);
         var block = ExtractClassBlock(content, "NestedChoice");
 
-        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+)\)");
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+), IsRequired=(?:true|false)\)");
         Assert.Equal(3, matches.Count); // A, B, C
 
         // All should share the same groupId (nested choice flattened).
@@ -4607,9 +4663,9 @@ namespace Test
         var content = string.Join("\n", contents);
         var block = ExtractClassBlock(content, "ChoiceInSequenceInChoice");
 
-        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+)\)");
-        // InnerX, InnerY (inner choice group), Extra (outer arm 0), Standalone (outer arm 1)
-        Assert.Equal(4, matches.Count);
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+), IsRequired=(?:true|false)\)");
+        // InnerX, InnerY (outer + inner choice groups), Extra (outer arm 0), Standalone (outer arm 1)
+        Assert.Equal(6, matches.Count);
 
         // Should have TWO distinct group IDs (inner choice is NOT flattened).
         var groupIds = matches.Select(m => int.Parse(m.Groups[1].Value)).Distinct().OrderBy(x => x).ToList();
@@ -4626,6 +4682,107 @@ namespace Test
         var standaloneMatch = matches.First(m => block.Substring(m.Index, 120).Contains("Standalone"));
         Assert.Equal(extraMatch.Groups[1].Value, standaloneMatch.Groups[1].Value); // same group
         Assert.NotEqual(extraMatch.Groups[1].Value, innerXMatch.Groups[1].Value); // different from inner group
+    }
+
+    [Fact]
+    public void TestChoiceGroupNestedChoiceKeepsOuterAndInnerMemberships()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupNestedChoiceKeepsOuterAndInnerMemberships), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "NestedChoiceMemberships");
+
+        var nestedInnerXAttributes = GetChoiceGroupAttributesForProperty(block, "NestedInnerX");
+        var nestedInnerYAttributes = GetChoiceGroupAttributesForProperty(block, "NestedInnerY");
+        var nestedExtraAttributes = GetChoiceGroupAttributesForProperty(block, "NestedExtra");
+        var nestedStandaloneAttributes = GetChoiceGroupAttributesForProperty(block, "NestedStandalone");
+
+        Assert.Equal(2, nestedInnerXAttributes.Count);
+        Assert.Equal(2, nestedInnerYAttributes.Count);
+        Assert.Single(nestedExtraAttributes);
+        Assert.Single(nestedStandaloneAttributes);
+
+        var outerGroupId = nestedExtraAttributes.Single().GroupId;
+        Assert.Contains(nestedInnerXAttributes, a => a.GroupId == outerGroupId && a.ArmId == nestedExtraAttributes.Single().ArmId && a.IsRequired);
+        Assert.Contains(nestedInnerYAttributes, a => a.GroupId == outerGroupId && a.ArmId == nestedExtraAttributes.Single().ArmId && a.IsRequired);
+        Assert.Equal(outerGroupId, nestedStandaloneAttributes.Single().GroupId);
+        Assert.NotEqual(nestedExtraAttributes.Single().ArmId, nestedStandaloneAttributes.Single().ArmId);
+
+        var innerXOnly = nestedInnerXAttributes.Single(a => a.GroupId != outerGroupId);
+        var innerYOnly = nestedInnerYAttributes.Single(a => a.GroupId != outerGroupId);
+        Assert.Equal(innerXOnly.GroupId, innerYOnly.GroupId);
+        Assert.NotEqual(innerXOnly.ArmId, innerYOnly.ArmId);
+        Assert.True(innerXOnly.IsRequired);
+        Assert.True(innerYOnly.IsRequired);
+    }
+
+    [Fact]
+    public void TestChoiceGroupRequiredMetadataReflectsChoiceMinOccurs()
+    {
+        // arrange
+        var generator = CreateChoiceGroupGenerator();
+
+        // act
+        var contents = ConvertXml(nameof(TestChoiceGroupRequiredMetadataReflectsChoiceMinOccurs), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // assert
+        var requiredBlock = ExtractClassBlock(content, "SimpleChoice");
+        var optionalBlock = ExtractClassBlock(content, "OptionalChoice");
+
+        Assert.All(GetChoiceGroupAttributesForProperty(requiredBlock, "Count"), a => Assert.True(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(requiredBlock, "Percentage"), a => Assert.True(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(optionalBlock, "OptionalAlpha"), a => Assert.False(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(optionalBlock, "OptionalBeta"), a => Assert.False(a.IsRequired));
+    }
+
+    [Fact]
+    public void TestChoiceGroupRequiredMetadataReflectsOptionalParent()
+    {
+        // arrange
+        var generator = CreateChoiceGroupGenerator();
+
+        // act
+        var contents = ConvertXml(nameof(TestChoiceGroupRequiredMetadataReflectsOptionalParent), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // assert
+        var optionalParentBlock = ExtractClassBlock(content, "OptionalParentRequiredChoice");
+        Assert.All(GetChoiceGroupAttributesForProperty(optionalParentBlock, "ParentOptionalAlpha"), a => Assert.False(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(optionalParentBlock, "ParentOptionalBeta"), a => Assert.False(a.IsRequired));
+    }
+
+    [Fact]
+    public void TestChoiceGroupRequiredMetadataPreservesOptionalityThroughGroupRef()
+    {
+        // arrange
+        var generator = CreateChoiceGroupGenerator();
+
+        // act
+        var contents = ConvertXml(nameof(TestChoiceGroupRequiredMetadataPreservesOptionalityThroughGroupRef), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // assert
+        var block = ExtractClassBlock(content, "OptionalOuterChoiceRequiredGroupRef");
+        Assert.All(GetChoiceGroupAttributesForProperty(block, "GroupNestedAlpha"), a => Assert.False(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(block, "GroupNestedBeta"), a => Assert.False(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(block, "GroupNestedExtra"), a => Assert.False(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(block, "GroupRefStandalone"), a => Assert.False(a.IsRequired));
+    }
+
+    [Fact]
+    public void TestChoiceContextForGroupRefPreservesInheritedOptionalityForNestedChoice()
+    {
+        // arrange
+        var optionalOuterMemberships = new[] { new ChoiceGroupMembership(groupId: 1, armId: 0, isRequired: false) };
+
+        // act
+        var groupRefContext = ChoiceContext.ForGroupRef(optionalOuterMemberships, isRequired: true);
+        var nestedChoiceContext = groupRefContext.EnterChoice(groupId: 2, isRequired: true);
+
+        // assert
+        Assert.All(groupRefContext.Memberships, membership => Assert.False(membership.IsRequired));
+        Assert.All(nestedChoiceContext.Memberships, membership => Assert.False(membership.IsRequired));
     }
 
     [Fact]
@@ -4659,8 +4816,28 @@ namespace Test
 
         // The XmlChoiceGroupAttribute class should be generated.
         Assert.Contains("class XmlChoiceGroupAttribute", content);
+        Assert.Contains("AllowMultiple=true", content.Replace(" ", ""));
         Assert.Contains("public int GroupId", content);
         Assert.Contains("public int ArmId", content);
+        Assert.Contains("public bool IsRequired", content);
+    }
+
+    private static List<(int GroupId, int ArmId, bool IsRequired)> GetChoiceGroupAttributesForProperty(string classBlock, string propertyName)
+    {
+        var propertyIndex = classBlock.IndexOf($" {propertyName} ", StringComparison.Ordinal);
+        Assert.True(propertyIndex >= 0, $"Could not find property {propertyName}.");
+
+        var previousPropertyIndex = classBlock.LastIndexOf(" { get; set; }", propertyIndex, StringComparison.Ordinal);
+        var searchStart = previousPropertyIndex < 0 ? 0 : previousPropertyIndex + " { get; set; }".Length;
+        var attributeBlock = classBlock[searchStart..propertyIndex];
+        var matches = Regex.Matches(attributeBlock, @"XmlChoiceGroupAttribute\((\d+), (\d+), IsRequired=(true|false)\)");
+
+        return matches
+            .Select(m => (
+                GroupId: int.Parse(m.Groups[1].Value),
+                ArmId: int.Parse(m.Groups[2].Value),
+                IsRequired: bool.Parse(m.Groups[3].Value)))
+            .ToList();
     }
 
     // -- GenerateStrictFixedValues tests ----------------

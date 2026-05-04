@@ -51,13 +51,40 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
     /// Identifies which choice group this property belongs to, if any.
     /// Null means the property is not part of a choice.
     /// </summary>
-    public int? ChoiceGroupId { get; set; }
+    public List<ChoiceGroupMembership> ChoiceGroupMemberships { get; } = [];
+
+    public int? ChoiceGroupId
+    {
+        get => ChoiceGroupMemberships.LastOrDefault()?.GroupId;
+        set
+        {
+            ChoiceGroupMemberships.Clear();
+            if (value.HasValue)
+            {
+                ChoiceGroupMemberships.Add(new ChoiceGroupMembership(value.Value, ChoiceArmId ?? 0, true));
+            }
+        }
+    }
 
     /// <summary>
     /// Identifies which arm within a choice group this property belongs to.
     /// Elements in the same arm (e.g. from a sequence within a choice) share the same arm ID.
     /// </summary>
-    public int? ChoiceArmId { get; set; }
+    public int? ChoiceArmId
+    {
+        get => ChoiceGroupMemberships.LastOrDefault()?.ArmId;
+        set
+        {
+            if (ChoiceGroupMemberships.Count == 0)
+            {
+                return;
+            }
+
+            var lastIndex = ChoiceGroupMemberships.Count - 1;
+            var membership = ChoiceGroupMemberships[lastIndex];
+            ChoiceGroupMemberships[lastIndex] = new ChoiceGroupMembership(membership.GroupId, value ?? 0, membership.IsRequired);
+        }
+    }
 
     public void SetFromNode(string originalName, bool useFixedIfNoDefault, IXmlSchemaNode xs)
     {
@@ -81,8 +108,8 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
         IsRequired = isRequired;
         IsCollection = item.MaxOccurs > 1.0m || particle.MaxOccurs > 1.0m; // http://msdn.microsoft.com/en-us/library/vstudio/d3hx2s7e(v=vs.100).aspx
 
-        ChoiceGroupId = item.ChoiceGroupId;
-        ChoiceArmId = item.ChoiceArmId;
+        ChoiceGroupMemberships.Clear();
+        ChoiceGroupMemberships.AddRange(item.ChoiceGroupMemberships);
     }
 
     public void SetSchemaNameAndNamespace(TypeModel owningTypeModel, IXmlSchemaNode xs)
@@ -779,14 +806,18 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
         if (IsAny && Configuration.EntityFramework)
             member.CustomAttributes.Add(notMappedAttribute);
 
-        if (ChoiceGroupId.HasValue && Configuration.GenerateChoiceGroupAttributes)
+        if (ChoiceGroupMemberships.Count > 0 && Configuration.GenerateChoiceGroupAttributes)
         {
             var attrTypeRef = new CodeTypeReference("XmlChoiceGroupAttribute");
-            var choiceAttr = new CodeAttributeDeclaration(
-                attrTypeRef,
-                new CodeAttributeArgument(new CodePrimitiveExpression(ChoiceGroupId.Value)),
-                new CodeAttributeArgument(new CodePrimitiveExpression(ChoiceArmId ?? 0)));
-            member.CustomAttributes.Add(choiceAttr);
+            foreach (var choiceGroupMembership in ChoiceGroupMemberships)
+            {
+                var choiceAttr = new CodeAttributeDeclaration(
+                    attrTypeRef,
+                    new CodeAttributeArgument(new CodePrimitiveExpression(choiceGroupMembership.GroupId)),
+                    new CodeAttributeArgument(new CodePrimitiveExpression(choiceGroupMembership.ArmId)),
+                    new CodeAttributeArgument(nameof(ChoiceGroupMembership.IsRequired), new CodePrimitiveExpression(choiceGroupMembership.IsRequired)));
+                member.CustomAttributes.Add(choiceAttr);
+            }
         }
 
         Configuration.MemberVisitor(member, this);

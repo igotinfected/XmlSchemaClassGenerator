@@ -201,17 +201,21 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
                 if (assignment.Target is IPropertyReferenceOperation propRef)
                 {
                     var property = propRef.Property;
-                    if (TryGetChoiceGroupInfo(property, out var groupId, out var armId))
+                    var choiceGroupInfos = GetChoiceGroupInfos(property).ToList();
+                    if (choiceGroupInfos.Count > 0)
                     {
                         var receiver = GetReceiverKey(propRef.Instance, captureToReceiver);
                         if (receiver != null)
                         {
-                            state.RecordAssignment(
-                                receiver,
-                                groupId,
-                                armId,
-                                property.Name,
-                                assignment.Syntax.GetLocation());
+                            foreach (var choiceGroupInfo in choiceGroupInfos)
+                            {
+                                state.RecordAssignment(
+                                    receiver,
+                                    choiceGroupInfo.GroupId,
+                                    choiceGroupInfo.ArmId,
+                                    property.Name,
+                                    assignment.Syntax.GetLocation());
+                            }
                         }
                     }
                 }
@@ -327,12 +331,12 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
                 {
                     var conflicting = armList[i];
 
-                    // Build a dedup key from the two locations.
+                    // Build a dedup key from the group ID and the two locations.
                     var loc1 = first.Value.Location.GetLineSpan().ToString();
                     var loc2 = conflicting.Value.Location.GetLineSpan().ToString();
                     var dedupKey = string.Compare(loc1, loc2, StringComparison.Ordinal) < 0
-                        ? $"{loc1}|{loc2}"
-                        : $"{loc2}|{loc1}";
+                        ? $"{groupId}|{loc1}|{loc2}"
+                        : $"{groupId}|{loc2}|{loc1}";
 
                     if (!reported.Add(dedupKey)) continue;
 
@@ -352,14 +356,8 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static bool TryGetChoiceGroupInfo(
-        IPropertySymbol property,
-        out int groupId,
-        out int armId)
+    private static IEnumerable<ChoiceGroupInfo> GetChoiceGroupInfos(IPropertySymbol property)
     {
-        groupId = 0;
-        armId = 0;
-
         foreach (var attr in property.GetAttributes())
         {
             if (attr.AttributeClass?.Name != AttributeShortName)
@@ -370,13 +368,9 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
                 args[0].Value is int g &&
                 args[1].Value is int a)
             {
-                groupId = g;
-                armId = a;
-                return true;
+                yield return new ChoiceGroupInfo(g, a);
             }
         }
-
-        return false;
     }
 
     // -------------------------------------------------------------------------
@@ -389,6 +383,18 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
         Parameter,
         This,
         Capture
+    }
+
+    private readonly struct ChoiceGroupInfo
+    {
+        public ChoiceGroupInfo(int groupId, int armId)
+        {
+            GroupId = groupId;
+            ArmId = armId;
+        }
+
+        public int GroupId { get; }
+        public int ArmId { get; }
     }
 
     /// <summary>

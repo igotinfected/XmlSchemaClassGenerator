@@ -17,7 +17,7 @@ public class XmlChoiceGroupAnalyzerTests
     private const string AttributeSource = @"
 namespace TestModels
 {
-    [System.AttributeUsage(System.AttributeTargets.Property, AllowMultiple = false)]
+    [System.AttributeUsage(System.AttributeTargets.Property, AllowMultiple = true)]
     public sealed class XmlChoiceGroupAttribute : System.Attribute
     {
         public int GroupId { get; }
@@ -148,6 +148,97 @@ public class Program
 ";
 
         var test = CreateTest(source);
+        await test.RunAsync();
+    }
+
+    [Fact]
+    public async Task ObjectInitializer_MultipleMemberships_ConflictsAcrossAllGroups()
+    {
+        var source = @"
+using TestModels;
+
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0)]
+    [XmlChoiceGroupAttribute(2, 0)]
+    public string? PropA { get; set; }
+
+    [XmlChoiceGroupAttribute(2, 1)]
+    public string? PropB { get; set; }
+
+    [XmlChoiceGroupAttribute(1, 1)]
+    public string? PropC { get; set; }
+}
+
+public class Program
+{
+    public void M()
+    {
+        var x = new MyType
+        {
+            {|#2:PropA = ""a""|},
+            {|#0:PropB = ""b""|},
+            {|#1:PropC = ""c""|},
+        };
+    }
+}
+";
+
+        var test = CreateTest(source,
+            Verify.Diagnostic(XmlChoiceGroupAnalyzer.DiagnosticId)
+                .WithLocation(0)
+                .WithLocation(2)
+                .WithArguments("PropB", "PropA", 2, 1, 0),
+            Verify.Diagnostic(XmlChoiceGroupAnalyzer.DiagnosticId)
+                .WithLocation(1)
+                .WithLocation(2)
+                .WithArguments("PropC", "PropA", 1, 1, 0));
+        await test.RunAsync();
+    }
+
+    [Fact]
+    public async Task ObjectInitializer_SamePropertyPairConflictsInMultipleGroups_ReportsEachGroup()
+    {
+        // arrange
+        var source = @"
+using TestModels;
+
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0)]
+    [XmlChoiceGroupAttribute(2, 0)]
+    public string? PropA { get; set; }
+
+    [XmlChoiceGroupAttribute(1, 1)]
+    [XmlChoiceGroupAttribute(2, 1)]
+    public string? PropB { get; set; }
+}
+
+public class Program
+{
+    public void M()
+    {
+        var x = new MyType
+        {
+            {|#1:PropA = ""a""|},
+            {|#0:PropB = ""b""|},
+        };
+    }
+}
+";
+
+        // act
+        var test = CreateTest(source,
+            Verify.Diagnostic(XmlChoiceGroupAnalyzer.DiagnosticId)
+                .WithLocation(0)
+                .WithLocation(1)
+                .WithArguments("PropB", "PropA", 1, 1, 0),
+            Verify.Diagnostic(XmlChoiceGroupAnalyzer.DiagnosticId)
+                .WithLocation(0)
+                .WithLocation(1)
+                .WithArguments("PropB", "PropA", 2, 1, 0));
+
+        // assert
         await test.RunAsync();
     }
 

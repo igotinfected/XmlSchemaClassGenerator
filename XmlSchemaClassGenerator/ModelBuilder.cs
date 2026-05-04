@@ -1014,9 +1014,9 @@ internal class ModelBuilder
                     // If this group ref is inside a choice, propagate the choice context
                     // so elements inside the group inherit the choice group/arm metadata.
                     // Any choices within the group are independent (not flattened).
-                    var groupContext = item.ChoiceGroupId.HasValue
-                        ? ChoiceContext.ForGroupRef(item.ChoiceGroupId.Value, item.ChoiceArmId ?? 0)
-                        : new ChoiceContext();
+                    var groupContext = item.ChoiceGroupMemberships.Count > 0
+                        ? ChoiceContext.ForGroupRef(item.ChoiceGroupMemberships, item.MinOccurs >= 1.0m)
+                        : new ChoiceContext().EnterNonChoiceCompositor(item.MinOccurs >= 1.0m);
                     var groupItems = GetElements(groupRef.Particle, groupContext).ToList();
                     var groupProperties = CreatePropertiesForElements(source, owningTypeModel, item, groupItems, order: order, passProperties: false).ToList();
                     if (_configuration.EmitOrder)
@@ -1166,7 +1166,7 @@ internal class ModelBuilder
             if (!context.IsDirectlyInsideChoice)
             {
                 // New top-level or non-directly-nested choice → own group.
-                context = context.EnterChoice(_nextChoiceGroupId++);
+                context = context.EnterChoice(_nextChoiceGroupId++, context.EffectiveIsRequired && groupBase.MinOccurs >= 1.0m);
             }
             // else: directly nested choice (choice > choice) — reuse the outer
             // group ID and continue arm numbering from where the parent left off.
@@ -1192,7 +1192,7 @@ internal class ModelBuilder
             // Sequence or All — elements inherit the outer choice context (same group/arm)
             // but we mark that we're no longer directly inside a choice, so any nested
             // choices encountered will start their own group rather than flattening.
-            var innerContext = context.IsInsideChoice ? context.EnterNonChoiceCompositor() : context;
+            var innerContext = context.EnterNonChoiceCompositor(groupBase.MinOccurs >= 1.0m);
 
             foreach (var item in groupBase.Items)
             {
@@ -1218,22 +1218,19 @@ internal class ModelBuilder
             case XmlSchemaElement element:
                 yield return new Particle(element, parent)
                 {
-                    ChoiceGroupId = context.GroupId,
-                    ChoiceArmId = context.IsInsideChoice ? context.CurrentArmId : null,
+                    ChoiceGroupMemberships = [.. context.Memberships],
                 };
                 break;
             case XmlSchemaAny any:
                 yield return new Particle(any, parent)
                 {
-                    ChoiceGroupId = context.GroupId,
-                    ChoiceArmId = context.IsInsideChoice ? context.CurrentArmId : null,
+                    ChoiceGroupMemberships = [.. context.Memberships],
                 };
                 break;
             case XmlSchemaGroupRef groupRef:
                 yield return new Particle(groupRef, parent)
                 {
-                    ChoiceGroupId = context.GroupId,
-                    ChoiceArmId = context.IsInsideChoice ? context.CurrentArmId : null,
+                    ChoiceGroupMemberships = [.. context.Memberships],
                 };
                 break;
             case XmlSchemaGroupBase itemGroupBase:
@@ -1270,11 +1267,12 @@ internal class ModelBuilder
         var ns = new CodeNamespace(GetChoiceGroupAttributeNamespace(_configuration));
         ns.Imports.Add(new CodeNamespaceImport("System"));
 
-        // [AttributeUsage(AttributeTargets.Property, AllowMultiple = false)]
+        // [AttributeUsage(AttributeTargets.Property, AllowMultiple = true)]
         // public sealed class XmlChoiceGroupAttribute : Attribute
         // {
         //     public int GroupId { get; }
         //     public int ArmId { get; }
+        //     public bool IsRequired { get; set; }
         //     public XmlChoiceGroupAttribute(int groupId, int armId)
         //     {
         //         GroupId = groupId;
@@ -1289,12 +1287,12 @@ internal class ModelBuilder
         };
         attrClass.BaseTypes.Add(new CodeTypeReference("System.Attribute"));
 
-        // [AttributeUsage(AttributeTargets.Property, AllowMultiple = false)]
+        // [AttributeUsage(AttributeTargets.Property, AllowMultiple = true)]
         attrClass.CustomAttributes.Add(new CodeAttributeDeclaration(
             new CodeTypeReference("System.AttributeUsageAttribute"),
             new CodeAttributeArgument(new CodeFieldReferenceExpression(
                 new CodeTypeReferenceExpression("System.AttributeTargets"), "Property")),
-            new CodeAttributeArgument("AllowMultiple", new CodePrimitiveExpression(false))));
+            new CodeAttributeArgument("AllowMultiple", new CodePrimitiveExpression(true))));
 
         // Properties: GroupId, ArmId
         var groupIdField = new CodeMemberField(typeof(int), "_groupId");
@@ -1328,6 +1326,25 @@ internal class ModelBuilder
         armIdProp.GetStatements.Add(new CodeMethodReturnStatement(
             new CodeFieldReferenceExpression(new CodeThisReferenceExpression(), "_armId")));
         attrClass.Members.Add(armIdProp);
+
+        var isRequiredField = new CodeMemberField(typeof(bool), "_isRequired");
+        isRequiredField.Attributes = MemberAttributes.Private;
+        attrClass.Members.Add(isRequiredField);
+
+        var isRequiredProp = new CodeMemberProperty
+        {
+            Name = "IsRequired",
+            Type = new CodeTypeReference(typeof(bool)),
+            Attributes = MemberAttributes.Public | MemberAttributes.Final,
+            HasGet = true,
+            HasSet = true,
+        };
+        isRequiredProp.GetStatements.Add(new CodeMethodReturnStatement(
+            new CodeFieldReferenceExpression(new CodeThisReferenceExpression(), "_isRequired")));
+        isRequiredProp.SetStatements.Add(new CodeAssignStatement(
+            new CodeFieldReferenceExpression(new CodeThisReferenceExpression(), "_isRequired"),
+            new CodePropertySetValueReferenceExpression()));
+        attrClass.Members.Add(isRequiredProp);
 
         // Constructor(int groupId, int armId)
         var ctor = new CodeConstructor
