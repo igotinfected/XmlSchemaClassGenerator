@@ -13,6 +13,7 @@ namespace XmlSchemaClassGenerator.Analyzer;
 public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
 {
     public const string DiagnosticId = "XCGA001";
+    public const string MissingRequiredChoiceGroupDiagnosticId = "XCGA002";
 
     private const string AttributeShortName = "XmlChoiceGroupAttribute";
 
@@ -25,8 +26,17 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
         isEnabledByDefault: true,
         description: "Setting properties from different arms of the same xs:choice group produces invalid XML. Only one arm of a choice group may be set at a time.");
 
+    private static readonly DiagnosticDescriptor MissingRequiredChoiceGroupRule = new(
+        MissingRequiredChoiceGroupDiagnosticId,
+        title: "Missing required XmlChoiceGroup arm",
+        messageFormat: "Object initializer for '{0}' must set a property from required xs:choice group (groupId={1})",
+        category: "Usage",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        description: "Object initializers for types with required xs:choice groups must set at least one property from each required choice group.");
+
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics { get; } =
-        ImmutableArray.Create(Rule);
+        ImmutableArray.Create(Rule, MissingRequiredChoiceGroupRule);
 
     public override void Initialize(AnalysisContext context)
     {
@@ -34,6 +44,39 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
         context.EnableConcurrentExecution();
 
         context.RegisterOperationBlockAction(AnalyzeOperationBlock);
+        context.RegisterOperationAction(AnalyzeObjectCreation, OperationKind.ObjectCreation);
+    }
+
+    private static void AnalyzeObjectCreation(OperationAnalysisContext context)
+    {
+        if (context.Operation is not IObjectCreationOperation objectCreation ||
+            objectCreation.Initializer == null ||
+            objectCreation.Type == null)
+        {
+            return;
+        }
+
+        var requiredGroupIds = GetRequiredChoiceGroupIds(objectCreation.Type);
+        if (requiredGroupIds.Count == 0)
+        {
+            return;
+        }
+
+        var assignedGroupIds = GetAssignedChoiceGroupIds(objectCreation.Initializer);
+
+        foreach (var requiredGroupId in requiredGroupIds)
+        {
+            if (assignedGroupIds.Contains(requiredGroupId))
+            {
+                continue;
+            }
+
+            context.ReportDiagnostic(Diagnostic.Create(
+                MissingRequiredChoiceGroupRule,
+                objectCreation.Syntax.GetLocation(),
+                objectCreation.Type.Name,
+                requiredGroupId));
+        }
     }
 
     private static void AnalyzeOperationBlock(OperationBlockAnalysisContext context)
@@ -368,10 +411,64 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
                 args[0].Value is int g &&
                 args[1].Value is int a)
             {
-                yield return new ChoiceGroupInfo(g, a);
+                yield return new ChoiceGroupInfo(g, a, IsRequiredChoiceGroupAttribute(attr));
             }
         }
     }
+
+    private static HashSet<int> GetRequiredChoiceGroupIds(ITypeSymbol type)
+    {
+        var groupIds = new HashSet<int>();
+
+        foreach (var property in GetPropertiesIncludingBaseTypes(type))
+        {
+            foreach (var choiceGroupInfo in GetChoiceGroupInfos(property))
+            {
+                if (choiceGroupInfo.IsRequired)
+                {
+                    groupIds.Add(choiceGroupInfo.GroupId);
+                }
+            }
+        }
+
+        return groupIds;
+    }
+
+    private static IEnumerable<IPropertySymbol> GetPropertiesIncludingBaseTypes(ITypeSymbol type)
+    {
+        for (var current = type; current != null; current = current.BaseType)
+        {
+            foreach (var property in current.GetMembers().OfType<IPropertySymbol>())
+            {
+                yield return property;
+            }
+        }
+    }
+
+    private static HashSet<int> GetAssignedChoiceGroupIds(IObjectOrCollectionInitializerOperation initializer)
+    {
+        var groupIds = new HashSet<int>();
+
+        foreach (var operation in initializer.Initializers)
+        {
+            if (operation is ISimpleAssignmentOperation assignment &&
+                assignment.Target is IPropertyReferenceOperation propertyReference)
+            {
+                foreach (var choiceGroupInfo in GetChoiceGroupInfos(propertyReference.Property))
+                {
+                    groupIds.Add(choiceGroupInfo.GroupId);
+                }
+            }
+        }
+
+        return groupIds;
+    }
+
+    private static bool IsRequiredChoiceGroupAttribute(AttributeData attribute) =>
+        attribute.NamedArguments.Any(argument =>
+            argument.Key == "IsRequired" &&
+            argument.Value.Value is bool isRequired &&
+            isRequired);
 
     // -------------------------------------------------------------------------
     // Supporting types
@@ -387,14 +484,16 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
 
     private readonly struct ChoiceGroupInfo
     {
-        public ChoiceGroupInfo(int groupId, int armId)
+        public ChoiceGroupInfo(int groupId, int armId, bool isRequired)
         {
             GroupId = groupId;
             ArmId = armId;
+            IsRequired = isRequired;
         }
 
         public int GroupId { get; }
         public int ArmId { get; }
+        public bool IsRequired { get; }
     }
 
     /// <summary>

@@ -22,6 +22,7 @@ namespace TestModels
     {
         public int GroupId { get; }
         public int ArmId { get; }
+        public bool IsRequired { get; set; }
         public XmlChoiceGroupAttribute(int groupId, int armId)
         {
             GroupId = groupId;
@@ -50,6 +51,326 @@ namespace TestModels
     // =========================================================================
     // Object initializer tests
     // =========================================================================
+
+    [Fact]
+    public async Task ObjectInitializer_MissingRequiredChoiceGroup_Reports()
+    {
+        // arrange
+        var source = @"
+using TestModels;
+
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0, IsRequired = true)]
+    public string? PropA { get; set; }
+
+    [XmlChoiceGroupAttribute(1, 1, IsRequired = true)]
+    public string? PropB { get; set; }
+
+    public string? Name { get; set; }
+}
+
+public class Program
+{
+    public void M()
+    {
+        var x = {|#0:new MyType
+        {
+            Name = ""value"",
+        }|};
+    }
+}
+";
+
+        // act
+        var test = CreateTest(source,
+            Verify.Diagnostic(XmlChoiceGroupAnalyzer.MissingRequiredChoiceGroupDiagnosticId)
+                .WithLocation(0)
+                .WithArguments("MyType", 1));
+
+        // assert
+        await test.RunAsync();
+    }
+
+    [Fact]
+    public async Task ObjectInitializer_RequiredChoiceGroupWithOneArm_NoDiagnostic()
+    {
+        // arrange
+        var source = @"
+using TestModels;
+
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0, IsRequired = true)]
+    public string? PropA { get; set; }
+
+    [XmlChoiceGroupAttribute(1, 1, IsRequired = true)]
+    public string? PropB { get; set; }
+}
+
+public class Program
+{
+    public void M()
+    {
+        var x = new MyType
+        {
+            PropA = ""a"",
+        };
+    }
+}
+";
+
+        // act
+        var test = CreateTest(source);
+
+        // assert
+        await test.RunAsync();
+    }
+
+    [Fact]
+    public async Task ObjectInitializer_DerivedTypeMissingInheritedRequiredChoiceGroup_Reports()
+    {
+        // arrange
+        var source = @"
+using TestModels;
+
+public class BaseType
+{
+    [XmlChoiceGroupAttribute(1, 0, IsRequired = true)]
+    public string? BaseA { get; set; }
+
+    [XmlChoiceGroupAttribute(1, 1, IsRequired = true)]
+    public string? BaseB { get; set; }
+}
+
+public class DerivedType : BaseType
+{
+    public string? Name { get; set; }
+}
+
+public class Program
+{
+    public void M()
+    {
+        var x = {|#0:new DerivedType
+        {
+            Name = ""value"",
+        }|};
+    }
+}
+";
+
+        // act
+        var test = CreateTest(source,
+            Verify.Diagnostic(XmlChoiceGroupAnalyzer.MissingRequiredChoiceGroupDiagnosticId)
+                .WithLocation(0)
+                .WithArguments("DerivedType", 1));
+
+        // assert
+        await test.RunAsync();
+    }
+
+    [Fact]
+    public async Task ObjectInitializer_DerivedTypeWithInheritedRequiredChoiceGroupAssigned_NoDiagnostic()
+    {
+        // arrange
+        var source = @"
+using TestModels;
+
+public class BaseType
+{
+    [XmlChoiceGroupAttribute(1, 0, IsRequired = true)]
+    public string? BaseA { get; set; }
+
+    [XmlChoiceGroupAttribute(1, 1, IsRequired = true)]
+    public string? BaseB { get; set; }
+}
+
+public class DerivedType : BaseType
+{
+    public string? Name { get; set; }
+}
+
+public class Program
+{
+    public void M()
+    {
+        var x = new DerivedType
+        {
+            BaseA = ""a"",
+        };
+    }
+}
+";
+
+        // act
+        var test = CreateTest(source);
+
+        // assert
+        await test.RunAsync();
+    }
+
+    [Fact]
+    public async Task ObjectInitializer_NestedInitializerWithCollidingGroupIdDoesNotSatisfyParent_Reports()
+    {
+        // arrange
+        var source = @"
+using TestModels;
+
+public class ParentType
+{
+    [XmlChoiceGroupAttribute(1, 0, IsRequired = true)]
+    public string? ParentA { get; set; }
+
+    [XmlChoiceGroupAttribute(1, 1, IsRequired = true)]
+    public string? ParentB { get; set; }
+
+    public ChildType? Child { get; set; }
+}
+
+public class ChildType
+{
+    [XmlChoiceGroupAttribute(1, 0, IsRequired = true)]
+    public string? ChildA { get; set; }
+
+    [XmlChoiceGroupAttribute(1, 1, IsRequired = true)]
+    public string? ChildB { get; set; }
+}
+
+public class Program
+{
+    public void M()
+    {
+        var x = {|#0:new ParentType
+        {
+            Child = new ChildType
+            {
+                ChildA = ""a"",
+            },
+        }|};
+    }
+}
+";
+
+        // act
+        var test = CreateTest(source,
+            Verify.Diagnostic(XmlChoiceGroupAnalyzer.MissingRequiredChoiceGroupDiagnosticId)
+                .WithLocation(0)
+                .WithArguments("ParentType", 1));
+
+        // assert
+        await test.RunAsync();
+    }
+
+    [Fact]
+    public async Task ObjectInitializer_OptionalChoiceGroupOmitted_NoDiagnostic()
+    {
+        // arrange
+        var source = @"
+using TestModels;
+
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0)]
+    public string? PropA { get; set; }
+
+    [XmlChoiceGroupAttribute(1, 1)]
+    public string? PropB { get; set; }
+}
+
+public class Program
+{
+    public void M()
+    {
+        var x = new MyType
+        {
+        };
+    }
+}
+";
+
+        // act
+        var test = CreateTest(source);
+
+        // assert
+        await test.RunAsync();
+    }
+
+    [Fact]
+    public async Task ObjectInitializer_PropertyWithMultipleRequiredMemberships_SatisfiesAllGroups()
+    {
+        // arrange
+        var source = @"
+using TestModels;
+
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0, IsRequired = true)]
+    [XmlChoiceGroupAttribute(2, 0, IsRequired = true)]
+    public string? PropA { get; set; }
+
+    [XmlChoiceGroupAttribute(1, 1, IsRequired = true)]
+    public string? PropB { get; set; }
+
+    [XmlChoiceGroupAttribute(2, 1, IsRequired = true)]
+    public string? PropC { get; set; }
+}
+
+public class Program
+{
+    public void M()
+    {
+        var x = new MyType
+        {
+            PropA = ""a"",
+        };
+    }
+}
+";
+
+        // act
+        var test = CreateTest(source);
+
+        // assert
+        await test.RunAsync();
+    }
+
+    [Fact]
+    public async Task ObjectInitializer_TargetTypedNewMissingRequiredChoiceGroup_Reports()
+    {
+        // arrange
+        var source = @"
+using TestModels;
+
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0, IsRequired = true)]
+    public string? PropA { get; set; }
+
+    [XmlChoiceGroupAttribute(1, 1, IsRequired = true)]
+    public string? PropB { get; set; }
+}
+
+public class Program
+{
+    public void M()
+    {
+        MyType x = {|#0:new()
+        {
+        }|};
+    }
+}
+";
+
+        // act
+        var test = CreateTest(source,
+            Verify.Diagnostic(XmlChoiceGroupAnalyzer.MissingRequiredChoiceGroupDiagnosticId)
+                .WithLocation(0)
+                .WithArguments("MyType", 1));
+
+        // assert
+        await test.RunAsync();
+    }
 
     [Fact]
     public async Task ObjectInitializer_ConflictingArms_Reports()
