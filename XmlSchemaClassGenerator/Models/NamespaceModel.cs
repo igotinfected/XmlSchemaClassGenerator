@@ -9,6 +9,7 @@ public class NamespaceModel(NamespaceKey key, GeneratorConfiguration configurati
     public string Name { get; set; }
     public NamespaceKey Key { get; } = key;
     public Dictionary<string, TypeModel> Types { get; set; } = [];
+    public Dictionary<string, CodeTypeDeclaration> ChoiceIdentifierEnums { get; } = [];
     /// <summary>
     /// Does the namespace of this type clashes with a class in the same or upper namespace?
     /// </summary>
@@ -28,7 +29,9 @@ public class NamespaceModel(NamespaceKey key, GeneratorConfiguration configurati
                 codeNamespace.Imports.Add(new CodeNamespaceImport(choiceGroupNs));
         }
 
-        foreach (var typeModel in parts.SelectMany(x => x.Types.Values).ToList())
+        var partsList = parts.ToList();
+
+        foreach (var typeModel in partsList.SelectMany(x => x.Types.Values).ToList())
         {
             var type = typeModel.Generate();
             if (type != null)

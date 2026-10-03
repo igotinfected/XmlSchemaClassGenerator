@@ -236,6 +236,15 @@ public class Generator
     }
 
     /// <summary>
+    /// Use <c>Text</c> for mixed content instead of <see cref="TextValuePropertyName"/>. Default is false.
+    /// </summary>
+    public bool UseLegacyMixedTextPropertyName
+    {
+        get { return _configuration.UseLegacyMixedTextPropertyName; }
+        set { _configuration.UseLegacyMixedTextPropertyName = value; }
+    }
+
+    /// <summary>
     /// Optional delegate that is called for each generated type member
     /// </summary>
     public Action<CodeTypeMember, PropertyModel> MemberVisitor
@@ -430,6 +439,24 @@ public class Generator
     {
         get { return _configuration.GenerateStrict; }
         set { _configuration.GenerateStrict = value; }
+    }
+
+    /// <summary>
+    /// Determines whether metadata helper attributes are emitted.
+    /// </summary>
+    public bool EmitMetadataAttributes
+    {
+        get { return _configuration.EmitMetadataAttributes; }
+        set { _configuration.EmitMetadataAttributes = value; }
+    }
+
+    /// <summary>
+    /// Namespace where generated metadata helper attributes are emitted.
+    /// </summary>
+    public string MetadataNamespace
+    {
+        get { return _configuration.MetadataNamespace; }
+        set { _configuration.MetadataNamespace = value; }
     }
 
     public bool ValidationError { get; private set; }

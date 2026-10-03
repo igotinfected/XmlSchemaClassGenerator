@@ -18,6 +18,12 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
     public bool IsSubstitution { get; set; }
     public TypeModel BaseClass { get; set; }
     public TypeModel TextValueType { get; set; }
+
+    /// <summary>
+    /// Default for the text value of a simple-content class, taken from the default of the
+    /// (only) element that uses this anonymous type.
+    /// </summary>
+    public string TextValueDefault { get; set; }
     public List<ClassModel> DerivedTypes { get; set; } = [];
     public override bool IsSubtype => BaseClass != null;
 
@@ -112,12 +118,15 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
                 var enableDataBinding = Configuration.EnableDataBinding;
                 var typeReference = BaseClass.GetReferenceFor(Namespace);
 
+                var textDefaultExpression = TextValueDefault != null ? BaseClass.GetDefaultValueFor(TextValueDefault, false) : null;
+
                 CodeMemberField backingFieldMember = null;
-                if (enableDataBinding)
+                if (enableDataBinding || textDefaultExpression != null)
                 {
                     backingFieldMember = new CodeMemberField(typeReference, textName.ToBackingField(Configuration.PrivateMemberPrefix))
                     {
-                        Attributes = MemberAttributes.Private
+                        Attributes = MemberAttributes.Private,
+                        InitExpression = textDefaultExpression
                     };
                     classDeclaration.Members.Add(backingFieldMember);
                 }
@@ -133,6 +142,15 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
                 };
 
                 var attribute = AttributeDecl<XmlTextAttribute>();
+                var valuePropertyModel = new PropertyModel(Configuration, textName, BaseClass, this);
+
+                if (textDefaultExpression != null)
+                {
+                    valuePropertyModel.SetDefaultValue(TextValueDefault);
+
+                    if (textDefaultExpression is CodePrimitiveExpression or CodeFieldReferenceExpression)
+                        text.CustomAttributes.Add(valuePropertyModel.CreateDefaultValueAttribute(typeReference, textDefaultExpression));
+                }
 
                 if (BaseClass is SimpleModel simpleModel)
                 {
@@ -141,6 +159,14 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
 
                     if (BaseClass.GetQualifiedName() is { Namespace: XmlSchema.Namespace, Name: var name } && (simpleModel.XmlSchemaType.Datatype.IsDataTypeAttributeAllowed(Configuration) ?? simpleModel.UseDataTypeAttribute))
                         attribute.Arguments.Add(new CodeAttributeArgument(nameof(XmlTextAttribute.DataType), new CodePrimitiveExpression(name)));
+
+                    if (!simpleModel.ValueType.IsValueType
+                        && Configuration.EnableNullableReferenceAttributes
+                        && !simpleModel.Restrictions.OfType<MinLengthRestrictionModel>().Any(r => r.Value >= 1))
+                    {
+                        text.CustomAttributes.Add(new CodeAttributeDeclaration(CodeUtilities.CreateTypeReference(Attributes.AllowNull, Configuration)));
+                        text.CustomAttributes.Add(new CodeAttributeDeclaration(CodeUtilities.CreateTypeReference(Attributes.MaybeNull, Configuration)));
+                    }
                 }
 
                 text.Comments.AddRange(GetComments(docs).ToArray());
@@ -174,8 +200,6 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
                 }
 
                 classDeclaration.Members.Add(text);
-
-                var valuePropertyModel = new PropertyModel(Configuration, textName, BaseClass, this);
 
                 Configuration.MemberVisitor(text, valuePropertyModel);
             }
@@ -223,7 +247,8 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
             Property.AddMembersTo(classDeclaration, Configuration.EnableDataBinding);
         }
 
-        if (IsMixed && (BaseClass == null || (BaseClass is ClassModel && !AllBaseClasses.Any(b => b.IsMixed))))
+        if (IsMixed && (BaseClass == null || (BaseClass is ClassModel && !AllBaseClasses.Any(b => b.IsMixed)))
+            && !string.IsNullOrEmpty(MixedTextPropertyBaseName))
         {
             var propName = GetMixedTextPropertyName();
             // hack to generate automatic property
@@ -238,10 +263,10 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
             text.Comments.Add(new CodeCommentStatement("<para>Gets or sets the mixed content text segments of this element.</para>", true));
             text.Comments.Add(new CodeCommentStatement("</summary>", true));
 
-            if (propName != "Text")
+            if (propName != MixedTextPropertyBaseName)
             {
                 text.Comments.Add(new CodeCommentStatement("<remarks>", true));
-                text.Comments.Add(new CodeCommentStatement($"This property was renamed from <c>Text</c> to <c>{propName}</c> to avoid a collision with an existing member.", true));
+                text.Comments.Add(new CodeCommentStatement($"This property was renamed from <c>{MixedTextPropertyBaseName}</c> to <c>{propName}</c> to avoid a collision with an existing member.", true));
                 text.Comments.Add(new CodeCommentStatement("</remarks>", true));
             }
 
@@ -316,16 +341,14 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
 
         enumValueProperty.CustomAttributes.Add(AttributeDecl<XmlIgnoreAttribute>());
 
-        // Getter: if (Enum.TryParse(typeof(T), Value, true, out var result)) return (T?)result; return null;
-        // Use "object?" to avoid CS8600 under #nullable enable: Enum.TryParse's out parameter is nullable.
-        var resultTypeRef = Configuration.EnableNullableDirective
-            ? PropertyModel.CreateLiteralTypeRef("object?")
-            : new CodeTypeReference(typeof(object));
-        var resultVariable = new CodeVariableDeclarationStatement(resultTypeRef, "result");
-        var tryParseCondition = new CodeMethodInvokeExpression(
+        // the generic overload is available on all supported target frameworks.
+        var resultVariable = new CodeVariableDeclarationStatement(enumTypeReference, "result");
+        var tryParseMethod = new CodeMethodReferenceExpression(
             new CodeTypeReferenceExpression(typeof(Enum)),
             "TryParse",
-            new CodeTypeOfExpression(enumTypeReference),
+            enumTypeReference);
+        var tryParseCondition = new CodeMethodInvokeExpression(
+            tryParseMethod,
             new CodePropertyReferenceExpression(new CodeThisReferenceExpression(), textName),
             new CodePrimitiveExpression(true),
             new CodeDirectionExpression(FieldDirection.Out, new CodeVariableReferenceExpression("result")));
@@ -333,7 +356,7 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
         enumValueProperty.GetStatements.Add(resultVariable);
         enumValueProperty.GetStatements.Add(new CodeConditionStatement(
             tryParseCondition,
-            new CodeMethodReturnStatement(new CodeCastExpression(nullableEnumTypeReference, new CodeVariableReferenceExpression("result")))));
+            new CodeMethodReturnStatement(new CodeVariableReferenceExpression("result"))));
         enumValueProperty.GetStatements.Add(new CodeMethodReturnStatement(new CodePrimitiveExpression(null)));
 
         // Setter: Value = value?.ToString()
@@ -367,22 +390,22 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
     {
         var rootClass = AllBaseTypes.LastOrDefault();
 
-        if (rootClass is SimpleModel || rootClass is EnumModel)
-        {
-            var val = GenerateCSharpCodeFromExpression(rootClass.GetDefaultValueFor(defaultString, attribute));
-            var reference = GenerateCSharpCodeFromExpression(new CodeTypeReferenceExpression(GetReferenceFor(referencingNamespace: null)));
-
-            return new CodeSnippetExpression($"new {reference} {{ {Configuration.TextValuePropertyName} = {val} }};");
-        }
-
         var mixedOwner = GetMixedTextOwner();
-        if (mixedOwner != null)
+        if (mixedOwner != null && !string.IsNullOrEmpty(mixedOwner.MixedTextPropertyBaseName))
         {
             var reference = GenerateCSharpCodeFromExpression(new CodeTypeReferenceExpression(GetReferenceFor(referencingNamespace: null)));
             var val = GenerateCSharpCodeFromExpression(new CodePrimitiveExpression(defaultString));
             var textPropName = mixedOwner.GetMixedTextPropertyName();
 
             return new CodeSnippetExpression($"new {reference} {{ {textPropName} = new string[] {{ {val} }} }};");
+        }
+
+        if (rootClass is SimpleModel || rootClass is EnumModel)
+        {
+            var val = GenerateCSharpCodeFromExpression(rootClass.GetDefaultValueFor(defaultString, attribute));
+            var reference = GenerateCSharpCodeFromExpression(new CodeTypeReferenceExpression(GetReferenceFor(referencingNamespace: null)));
+
+            return new CodeSnippetExpression($"new {reference} {{ {Configuration.TextValuePropertyName} = {val} }};");
         }
 
         return base.GetDefaultValueFor(defaultString, attribute);
@@ -398,14 +421,16 @@ public class ClassModel(GeneratorConfiguration configuration) : ReferenceTypeMod
         return AllBaseClasses.FirstOrDefault(b => b.IsMixed && (b.BaseClass == null || (b.BaseClass is ClassModel && !b.AllBaseClasses.Any(bb => bb.IsMixed))));
     }
 
+    private string MixedTextPropertyBaseName => Configuration.UseLegacyMixedTextPropertyName ? "Text" : Configuration.TextValuePropertyName;
+
     private string GetMixedTextPropertyName()
     {
-        var propName = "Text";
+        var propName = MixedTextPropertyBaseName;
         var propertyIndex = 1;
 
         while (Properties.Exists(x => x.Name.Equals(propName, StringComparison.Ordinal)) || propName.Equals(Name, StringComparison.Ordinal))
         {
-            propName = $"Text_{propertyIndex}";
+            propName = $"{MixedTextPropertyBaseName}_{propertyIndex}";
             propertyIndex++;
         }
 

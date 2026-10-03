@@ -170,8 +170,8 @@ namespace XmlSchemaClassGenerator
                 XmlTypeCode.AnyAtomicType => configuration.MapUnionToWidestCommonType ? GetUnionType(configuration, schemaType, attribute) : typeof(string), // union
                 XmlTypeCode.AnyUri or XmlTypeCode.GDay or XmlTypeCode.GMonth or XmlTypeCode.GMonthDay or XmlTypeCode.GYear or XmlTypeCode.GYearMonth => typeof(string),
                 XmlTypeCode.Duration => configuration.NetCoreSpecificCode ? type.ValueType : typeof(string),
-                XmlTypeCode.Time => configuration.UseDateOnly ? typeof(TimeOnly) : (configuration.DateTimeWithTimeZone ? typeof(DateTimeOffset) : typeof(DateTime)),
-                XmlTypeCode.Date => configuration.UseDateOnly ? typeof(DateOnly) : (configuration.DateTimeWithTimeZone ? typeof(DateTimeOffset) : typeof(DateTime)),
+                XmlTypeCode.Time => configuration.UseDateOnly ? typeof(TimeOnly) : GetDateTimeType(configuration),
+                XmlTypeCode.Date => configuration.UseDateOnly ? typeof(DateOnly) : GetDateTimeType(configuration),
                 XmlTypeCode.DateTime => configuration.DateTimeWithTimeZone ? typeof(DateTimeOffset) : typeof(DateTime),
                 XmlTypeCode.Idref => typeof(string),
                 XmlTypeCode.Integer or XmlTypeCode.NegativeInteger or XmlTypeCode.NonNegativeInteger or XmlTypeCode.NonPositiveInteger or XmlTypeCode.PositiveInteger => GetIntegerDerivedType(type, configuration, restrictions),
@@ -202,6 +202,9 @@ namespace XmlSchemaClassGenerator
 
             return resultType;
         }
+
+        private static Type GetDateTimeType(GeneratorConfiguration configuration)
+            => configuration.DateTimeWithTimeZone ? typeof(DateTimeOffset) : typeof(DateTime);
 
         static readonly Type[] intTypes = [typeof(byte), typeof(sbyte), typeof(ushort), typeof(short), typeof(uint), typeof(int), typeof(ulong), typeof(long), typeof(decimal)];
         static readonly Type[] decimalTypes = [typeof(float), typeof(double), typeof(decimal)];
@@ -523,6 +526,8 @@ namespace XmlSchemaClassGenerator
     {
         private const string DataAnnotations = "System.ComponentModel.DataAnnotations";
         private const string CodeAnalysis = "System.Diagnostics.CodeAnalysis";
+        internal const string FractionDigitsAttributeName = "FractionDigitsAttribute";
+        internal const string CollectionItemStringLengthAttributeName = "CollectionItemStringLengthAttribute";
 
         private static TypeInfo Make(string @namespace, [CallerMemberName] string name = null)
             => new(@namespace, name + "Attribute");
@@ -535,6 +540,8 @@ namespace XmlSchemaClassGenerator
         public static TypeInfo StringLength { get; } = Make(DataAnnotations);
         public static TypeInfo RegularExpression { get; } = Make(DataAnnotations);
         public static TypeInfo NotMapped { get; } = Make($"{DataAnnotations}.Schema");
+        public static TypeInfo FractionDigits(string metadataNamespace) => new(metadataNamespace, FractionDigitsAttributeName);
+        public static TypeInfo CollectionItemStringLength(string metadataNamespace) => new(metadataNamespace, CollectionItemStringLengthAttributeName);
 
         public static TypeInfo AllowNull { get; } = Make(CodeAnalysis);
         public static TypeInfo MaybeNull { get; } = Make(CodeAnalysis);

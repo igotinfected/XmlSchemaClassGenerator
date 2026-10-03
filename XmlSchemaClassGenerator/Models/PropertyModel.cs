@@ -161,7 +161,7 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
         {{
             get
             {{
-                return {backingField.Name};
+                return {backingFieldReference()};
             }}
             {setter}
             {{{(assignedField == null ? "" : $"\n                {assignedField} = true;")}{(typeCode, withDataBinding) switch
@@ -169,16 +169,16 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
             (PropertyValueTypeCode.ValueType, true) => $@"
                 if ({checkEquality()}){assignAndNotify()}",
             (PropertyValueTypeCode.Other or PropertyValueTypeCode.Array, true) => $@"
-                if ({backingField.Name} == value)
+                if ({backingFieldReference()} == value)
                     return;
-                if ({backingField.Name} == null || value == null || {checkEquality()}){assignAndNotify()}",
+                if ({backingFieldReference()} == null || value == null || {checkEquality()}){assignAndNotify()}",
             _ => assign(),
         }}
             }}
         }}");
 
         string assign() => $@"
-                {backingField.Name} = value;";
+                {backingFieldReference()} = value;";
 
         string assignAndNotify() => $@"
                 {{{assign()}
@@ -186,7 +186,9 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
                 }}";
 
         string checkEquality()
-            => $"!{backingField.Name}.{(typeCode is PropertyValueTypeCode.Array ? nameof(Enumerable.SequenceEqual) : EqualsMethod)}(value)";
+            => $"!{backingFieldReference()}.{(typeCode is PropertyValueTypeCode.Array ? nameof(Enumerable.SequenceEqual) : EqualsMethod)}(value)";
+
+        string backingFieldReference() => backingField.Name == "value" ? "this.value" : backingField.Name;
     }
 
     private ClassModel TypeClassModel => Type as ClassModel;
@@ -237,6 +239,11 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
     private bool IsPrivateSetter => IsEnumerable && Configuration.CollectionSettersMode == CollectionSettersMode.Private;
 
+    private bool IsPrimitiveType => Type is SimpleModel simpleModel
+        && (simpleModel.ValueType.IsPrimitive
+            || simpleModel.ValueType == typeof(string)
+            || simpleModel.ValueType == typeof(decimal));
+
     private CodeTypeReference TypeReference => PropertyType.GetReferenceFor(OwningType.Namespace, collection: IsEnumerable, attribute: IsAttribute);
 
     private void AddDocs(CodeTypeMember member)
@@ -245,11 +252,21 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
         AddDescription(member.CustomAttributes, docs);
 
-        if (PropertyType is SimpleModel simpleType && !IsEnumerable)
+        if (PropertyType is SimpleModel simpleType)
         {
-            docs.AddRange(simpleType.Documentation);
-            docs.AddRange(simpleType.Restrictions.Select(r => new DocumentationModel { Language = English, Text = r.Description }));
-            member.CustomAttributes.AddRange(simpleType.GetRestrictionAttributes().ToArray());
+            if (!IsEnumerable)
+            {
+                docs.AddRange(simpleType.Documentation);
+                docs.AddRange(simpleType.Restrictions.Select(r => new DocumentationModel { Language = English, Text = r.Description }));
+                member.CustomAttributes.AddRange(simpleType.GetRestrictionAttributes().ToArray());
+            }
+            else if (simpleType.GetCollectionItemStringLengthAttribute() is { } collectionAttribute)
+            {
+                member.CustomAttributes.Add(collectionAttribute);
+                docs.AddRange(simpleType.Restrictions
+                    .Where(r => r is MinLengthRestrictionModel or MaxLengthRestrictionModel or MinMaxLengthRestrictionModel)
+                    .Select(r => new DocumentationModel { Language = English, Text = r.Description }));
+            }
         }
 
         member.Comments.AddRange(GetComments(docs).ToArray());
@@ -262,7 +279,12 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
         }
     }
 
-    private CodeAttributeDeclaration CreateDefaultValueAttribute(CodeTypeReference typeReference, CodeExpression defaultValueExpression)
+    internal bool HasCollectionItemStringLengthAttribute
+        => IsEnumerable && PropertyType is SimpleModel simpleType && simpleType.GetCollectionItemStringLengthAttribute() != null;
+
+    internal void SetDefaultValue(string defaultValue) => DefaultValue = defaultValue;
+
+    internal CodeAttributeDeclaration CreateDefaultValueAttribute(CodeTypeReference typeReference, CodeExpression defaultValueExpression)
     {
         var defaultValueAttribute = AttributeDecl<DefaultValueAttribute>();
 
@@ -922,6 +944,17 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
             member.CustomAttributes.AddRange(attributes);
         }
 
+        // A flattened substitution group maps several elements with different CLR types onto one
+        // member. In valid XSD every substitute derives from the head element's type, but NeTEx (and
+        // others) contain substitutes whose CLR type is unrelated to the head's. When any element
+        // type is not assignable to the member type, XmlSerializer can only hold them all if the
+        // member is typed as object (as xsd.exe does for a choice). Collection members are already
+        // generated with an object item type where needed, and retyping them here would break the
+        // backing field / initializer, so this only applies to single-valued members.
+        if (!IsPrimitiveType && !IsAny && !Configuration.SeparateSubstitutes && Substitutes.Count > 0
+            && !isEnumerable && Substitutes.Any(sub => !IsAssignableTo(sub.Type, Type)))
+            RetypeChoiceMemberAsObject(member);
+
         // initialize List<>
         if (isEnumerable && (Configuration.CollectionSettersMode != CollectionSettersMode.PublicWithoutConstructorInitialization)
             && (Configuration.CollectionSettersMode != CollectionSettersMode.InitWithoutConstructorInitialization))
@@ -1110,5 +1143,32 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
         }
 
         return attributes;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="from"/> is the same type as, or derives from, <paramref name="to"/>,
+    /// i.e. a value of <paramref name="from"/> can be stored in a member typed as <paramref name="to"/>.
+    /// </summary>
+    private static bool IsAssignableTo(TypeModel from, TypeModel to)
+        => from == to || (from is ClassModel classModel && classModel.AllBaseTypes.Contains(to));
+
+    /// <summary>
+    /// Retypes a single-valued flattened-substitution-group member as object so XmlSerializer can assign
+    /// any of its choice element types, and gives the substitution group head element (the only
+    /// XmlElement without an explicit Type) an explicit Type now that the member type no longer
+    /// identifies it.
+    /// </summary>
+    private void RetypeChoiceMemberAsObject(CodeMemberField memberField)
+    {
+        var headElementType = PropertyType.GetReferenceFor(OwningType.Namespace);
+        var headElement = memberField.CustomAttributes
+            .OfType<CodeAttributeDeclaration>()
+            .Where(attribute => attribute.AttributeType.BaseType == typeof(XmlElementAttribute).FullName)
+            .FirstOrDefault(attribute => !attribute.Arguments
+                .OfType<CodeAttributeArgument>()
+                .Any(argument => argument.Name == nameof(XmlElementAttribute.Type)));
+        headElement?.Arguments.Add(new CodeAttributeArgument(nameof(XmlElementAttribute.Type), new CodeTypeOfExpression(headElementType)));
+
+        memberField.Type = new CodeTypeReference(typeof(object));
     }
 }

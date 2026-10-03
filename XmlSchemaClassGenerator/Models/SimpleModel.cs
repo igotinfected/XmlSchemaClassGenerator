@@ -220,27 +220,17 @@ public class SimpleModel(GeneratorConfiguration configuration) : TypeModel(confi
             }
         }
 
-        // When strict range bounds is on and no explicit [Range] was emitted,
-        // derive a range from totalDigits/fractionDigits restrictions.
-        // totalDigits=n means at most n digits total; fractionDigits=f means f of those
-        // are after the decimal point. The maximum value is (10^n - 1) / 10^f.
+        // fractionDigits limits decimal places but does not require them.
+        // totalDigits therefore bounds the magnitude independently of fractionDigits.
         if (Configuration.GenerateStrictRangeBounds && !emittedExplicitRange)
         {
             var totalDigits = Restrictions.OfType<TotalDigitsRestrictionModel>().FirstOrDefault(x => x.IsSupported);
             if (totalDigits != null && totalDigits.Value > 0)
             {
-                var fractionDigits = Restrictions.OfType<FractionDigitsRestrictionModel>().FirstOrDefault(x => x.IsSupported);
-                var fraction = fractionDigits?.Value ?? 0;
-
-                // Compute the maximum absolute value: (10^totalDigits - 1) / 10^fractionDigits
-                // Use decimal arithmetic to avoid floating-point precision issues.
-                // Guard against unreasonably large digit counts that would overflow decimal.
+                // keep the power within decimal's supported precision.
                 if (totalDigits.Value <= 28) // decimal has ~28-29 significant digits
                 {
                     var maxAbsolute = DecimalPow10(totalDigits.Value) - 1m;
-                    if (fraction > 0)
-                        maxAbsolute /= DecimalPow10(fraction);
-
                     var maxStr = maxAbsolute.ToString(CultureInfo.InvariantCulture);
                     var minStr = (-maxAbsolute).ToString(CultureInfo.InvariantCulture);
 
@@ -298,5 +288,30 @@ public class SimpleModel(GeneratorConfiguration configuration) : TypeModel(confi
         if (type == typeof(double)) return (min ? double.MinValue : double.MaxValue).ToString(CultureInfo.InvariantCulture);
         if (type == typeof(decimal)) return (min ? decimal.MinValue : decimal.MaxValue).ToString(CultureInfo.InvariantCulture);
         return null;
+    }
+
+    public CodeAttributeDeclaration GetCollectionItemStringLengthAttribute()
+    {
+        if (!Configuration.EmitMetadataAttributes)
+            return null;
+
+        var minMax = Restrictions.OfType<MinMaxLengthRestrictionModel>().FirstOrDefault();
+        var minLength = Restrictions.OfType<MinLengthRestrictionModel>().FirstOrDefault();
+        var maxLength = Restrictions.OfType<MaxLengthRestrictionModel>().FirstOrDefault();
+
+        var min = minMax?.Min ?? minLength?.Value ?? 0;
+        var max = minMax?.Max ?? maxLength?.Value ?? 0;
+
+        if (min <= 0 && max <= 0)
+            return null;
+
+        var attribute = new CodeAttributeDeclaration(
+            CodeUtilities.CreateTypeReference(Attributes.CollectionItemStringLength(Configuration.MetadataNamespace), Configuration),
+            new CodeAttributeArgument(max > 0 ? new CodePrimitiveExpression(max) : new CodeSnippetExpression("int.MaxValue")));
+
+        if (min > 0)
+            attribute.Arguments.Add(new CodeAttributeArgument("MinimumLength", new CodePrimitiveExpression(min)));
+
+        return attribute;
     }
 }
