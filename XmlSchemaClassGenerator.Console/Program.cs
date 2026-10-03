@@ -78,6 +78,8 @@ static class Program
         var strictRangeBounds = false;
         NamingScheme? namingScheme = null;
         var forceUriScheme = "none";
+        var emitMetadataAttributes = false;
+        var metadataNamespace = GeneratorConfiguration.DefaultMetadataNamespace;
 
 
         var options = new OptionSet {
@@ -102,9 +104,17 @@ Lines starting with # and empty lines are ignored.", v => nameSubstituteFiles.Ad
             { "d|datetime-offset", "map xs:datetime and derived types to System.DateTimeOffset instead of System.DateTime", v => dateTimeWithTimeZone = v != null },
             { "do|dateOnly", "map xs:date to System.DateOnly and xs:time to System.TimeOnly", v => useDateOnly = v != null },
             { "i|integer=", @"map xs:integer and derived types to {TYPE} instead of automatic approximation
-{TYPE} can be i[nt], l[ong], or d[ecimal]", v => {
+{TYPE} can be sb[yte], sh[ort], i[nt], l[ong], ni[nt], b[yte], us[hort], ui[nt], ul[ong], nui[nt], or d[ecimal]", v => {
                                      switch (v)
                                      {
+                                         case "sb":
+                                         case "sbyte":
+                                             integerType = typeof(sbyte);
+                                             break;
+                                         case "sh":
+                                         case "short":
+                                             integerType = typeof(short);
+                                             break;
                                          case "i":
                                          case "int":
                                              integerType = typeof(int);
@@ -112,6 +122,30 @@ Lines starting with # and empty lines are ignored.", v => nameSubstituteFiles.Ad
                                          case "l":
                                          case "long":
                                              integerType = typeof(long);
+                                             break;
+                                         case "ni":
+                                         case "nint":
+                                             integerType = typeof(nint);
+                                             break;
+                                         case "b":
+                                         case "byte":
+                                             integerType = typeof(byte);
+                                             break;
+                                         case "us":
+                                         case "ushort":
+                                             integerType = typeof(ushort);
+                                             break;
+                                         case "ui":
+                                         case "uint":
+                                             integerType = typeof(uint);
+                                             break;
+                                         case "ul":
+                                         case "ulong":
+                                             integerType = typeof(ulong);
+                                             break;
+                                         case "nui":
+                                         case "nuint":
+                                             integerType = typeof(nuint);
                                              break;
                                          case "d":
                                          case "decimal":
@@ -204,7 +238,9 @@ with or without backing field initialization for collections
                     };
                 }
             },
-            { "fu|forceUriScheme=", "force URI scheme when resolving URLs (default is none; can be: none, same, or any defined value for scheme, like https or http)", v => forceUriScheme = v }
+            { "fu|forceUriScheme=", "force URI scheme when resolving URLs (default is none; can be: none, same, or any defined value for scheme, like https or http)", v => forceUriScheme = v },
+            { "ema|emitMetadataAttributes", "emit metadata helper attributes (default is false)", v => emitMetadataAttributes = v != null },
+            { "mn|metadataNamespace=", $"namespace for generated metadata helper attributes (default is {GeneratorConfiguration.DefaultMetadataNamespace})", v => metadataNamespace = v }
         };
 
         var globsAndUris = options.Parse(args);
@@ -300,7 +336,9 @@ with or without backing field initialization for collections
             EnumCollection = enumCollection,
             GenerateStrictFixedValues = strictFixedValues,
             GenerateStrictRangeBounds = strictRangeBounds,
-            ForceUriScheme = forceUriScheme
+            ForceUriScheme = forceUriScheme,
+            EmitMetadataAttributes = emitMetadataAttributes,
+            MetadataNamespace = metadataNamespace
         };
 
         if (namingScheme != null)

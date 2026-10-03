@@ -6,6 +6,7 @@ using System.Xml;
 using System.Xml.Linq;
 using System.Xml.Schema;
 using System.Xml.Serialization;
+using XmlSchemaClassGenerator.Metadata;
 
 namespace XmlSchemaClassGenerator;
 
@@ -138,9 +139,23 @@ internal class ModelBuilder
                     order++;
                 }
 
-                if (prop.XmlSchemaName != null)
+                // Substitution groups apply only to elements referenced via ref= (which resolve to a
+                // global head element). A local element declaration that merely shares a name with a
+                // global substitution-group head is a distinct element and must not inherit its members,
+                // otherwise those members collide with the real ref-based expansion of the same group.
+                if (prop.XmlSchemaName != null && prop.XmlParticle is XmlSchemaElement { RefName.IsEmpty: false })
                 {
-                    var substitutes = GetSubstitutedElements(prop.XmlSchemaName);
+                    // A substitution-group member can also appear as an explicit sibling element in the
+                    // same content model (e.g. NeTEx EntranceRef, which is both a member of the
+                    // SiteElementRef group and a trailing element). XmlSerializer requires element names
+                    // to be unique within a type, so drop substitutes that duplicate a sibling element;
+                    // the explicit sibling declaration wins.
+                    var siblingElementNames = new HashSet<XmlQualifiedName>(classProps
+                        .Where(p => p != prop && p.XmlSchemaName != null)
+                        .Select(p => p.XmlSchemaName));
+
+                    var substitutes = GetSubstitutedElements(prop.XmlSchemaName)
+                        .Where(s => !siblingElementNames.Contains(s.Element.QualifiedName));
 
                     if (_configuration.SeparateSubstitutes)
                     {
@@ -295,10 +310,9 @@ internal class ModelBuilder
 
         if (imports.Any())
         {
-            foreach (var importSchema in imports.Select(i => i.Schema))
+            foreach (var importSchema in imports.Select(i => i.Schema).Where(importSchema => importSchema != null))
             {
-                if (importSchema != null)
-                    ResolveDependencies(importSchema, dependencyOrder, seenSchemas);
+                ResolveDependencies(importSchema, dependencyOrder, seenSchemas);
             }
         }
 
@@ -423,7 +437,10 @@ internal class ModelBuilder
         {
             foreach (var substitute in substitutes.Where(s => s.Element.QualifiedName != name))
             {
-                yield return substitute;
+                if (!substitute.Element.IsAbstract)
+                {
+                    yield return substitute;
+                }
                 foreach (var recursiveSubstitute in GetSubstitutedElements(substitute.Element.QualifiedName))
                     yield return recursiveSubstitute;
             }
@@ -700,7 +717,12 @@ internal class ModelBuilder
             // if EnumCollection flag is enabled and the simpleType is a list, check if the item type is an enum and
             // set the model's ListItemType to that enum, so that the generated collection can be of the enum type instead of string
             TypeModel enumListItemTypeModel = null;
-            var itemTypeModel = builder.CreateTypeModel(listItemType.QualifiedName, listItemType);
+            var listItemTypeQualifiedName = listItemType.QualifiedName;
+            if (listItemTypeQualifiedName.IsEmpty)
+            {
+                listItemTypeQualifiedName = new XmlQualifiedName(qualifiedName.Name + "List", qualifiedName.Namespace);
+            }
+            var itemTypeModel = builder.CreateTypeModel(listItemTypeQualifiedName, listItemType);
             if (itemTypeModel is EnumModel)
             {
                 enumListItemTypeModel = itemTypeModel;
@@ -877,6 +899,47 @@ internal class ModelBuilder
                 .Select(a => (InterfaceModel)builder.CreateTypeModel(a.RefName, builder.AttributeGroups[a.RefName].First()));
             refTypeModel.AddInterfaces(interfaces);
         }
+
+        /// <summary>
+        /// <para>
+        /// Follows the <see cref="XmlSchemaSimpleType.BaseXmlSchemaType"/> chain to find the item type
+        /// of an <c>xs:list</c>. Returns <c>null</c> if no list content is found.
+        /// </para>
+        /// <para>
+        /// Direct — the simpleType's Content is the list itself, matched on the first iteration:
+        /// <code>
+        ///   &lt;xs:simpleType&gt;
+        ///     &lt;xs:list itemType="my:enumType" /&gt;
+        ///   &lt;/xs:simpleType&gt;
+        /// </code>
+        /// </para>
+        /// <para>
+        /// Wrapped — the simpleType's Content is a restriction.
+        /// The restriction's <see cref="XmlSchemaSimpleType.BaseXmlSchemaType"/> points to an
+        /// anonymous inner simpleType whose Content is the list, reached on the second iteration:
+        /// <code>
+        ///   &lt;xs:simpleType&gt;
+        ///     &lt;xs:restriction&gt;
+        ///       &lt;xs:simpleType&gt;&lt;xs:list itemType="my:enumType" /&gt;&lt;/xs:simpleType&gt;
+        ///       &lt;xs:minLength value="1" /&gt;
+        ///     &lt;/xs:restriction&gt;
+        ///   &lt;/xs:simpleType&gt;
+        /// </code>
+        /// </para>
+        /// </summary>
+        /// <param name="type">The simple type to inspect.</param>
+        /// <returns>The resolved item type of the list, or <c>null</c> if no list content was found.</returns>
+        private static XmlSchemaSimpleType FindListItemType(XmlSchemaSimpleType type)
+        {
+            for (var current = type; current != null; current = current.BaseXmlSchemaType as XmlSchemaSimpleType)
+            {
+                if (current.Content is XmlSchemaSimpleTypeList list)
+                {
+                    return list.BaseItemType ?? list.ItemType;
+                }
+            }
+            return null;
+        }
     }
 
     private IEnumerable<PropertyModel> CreatePropertiesForAttributes(Uri source, TypeModel owningTypeModel, IEnumerable<XmlSchemaObject> items)
@@ -985,9 +1048,22 @@ internal class ModelBuilder
         Substitute substitute = null, int order = 0, bool passProperties = true)
     {
         var properties = new List<PropertyModel>();
+        var initialOrder = order;
+        XmlSchemaObject prevParent = null;
+        int batchStart = -1;
 
         foreach (var item in items)
         {
+            // Track parent changes to detect transitions between choice branches.
+            // When elements from a new branch are encountered, batchStart marks where
+            // the new branch's properties begin in the list.
+            if (item.XmlParent != prevParent)
+            {
+                if (prevParent != null)
+                    batchStart = properties.Count;
+                prevParent = item.XmlParent;
+            }
+
             PropertyModel property = null;
 
             switch (item.XmlParticle)
@@ -1030,18 +1106,42 @@ internal class ModelBuilder
             // Discard duplicate property names. This is most likely due to:
             // - Choice or
             // - Element and attribute with the same name
-            if (property != null && !properties.Exists(p => p.Name == property.Name))
+            if (property != null)
             {
-                var itemDocs = GetDocumentation(item.XmlParticle);
-                property.Documentation.AddRange(itemDocs);
+                var existingIndex = properties.FindIndex(p => p.Name == property.Name);
+                if (existingIndex >= 0)
+                {
+                    // Duplicate found in a choice branch - move the current batch of
+                    // new-branch properties to just before the duplicate's position
+                    // so that the interleaved order across branches is preserved.
+                    if (batchStart >= 0 && batchStart < properties.Count)
+                    {
+                        var count = properties.Count - batchStart;
+                        var segment = properties.GetRange(batchStart, count);
+                        properties.RemoveRange(batchStart, count);
+                        var adjustedIndex = existingIndex >= batchStart ? existingIndex - count : existingIndex;
+                        properties.InsertRange(adjustedIndex, segment);
+                    }
+                    batchStart = properties.Count;
+                }
+                else
+                {
+                    var itemDocs = GetDocumentation(item.XmlParticle);
+                    property.Documentation.AddRange(itemDocs);
 
-                if (_configuration.EmitOrder)
-                    property.Order = order++;
+                    property.IsDeprecated = itemDocs.Exists(d => d.Text.StartsWith("DEPRECATED"));
 
-                property.IsDeprecated = itemDocs.Exists(d => d.Text.StartsWith("DEPRECATED"));
-
-                properties.Add(property);
+                    properties.Add(property);
+                }
             }
+        }
+
+        // Reassign Order values based on final property positions,
+        // accounting for any reordering due to choice branch interleaving.
+        if (_configuration.EmitOrder)
+        {
+            for (var i = 0; i < properties.Count; i++)
+                properties[i].Order = initialOrder + i;
         }
 
         return properties;
@@ -1096,6 +1196,16 @@ internal class ModelBuilder
         property.SetFromParticles(particle, item, isRequired);
         property.SetFromNode(originalName, isRequired, element);
         property.SetSchemaNameAndNamespace(owningTypeModel, effectiveElement);
+
+        // The default of an optional element with simple content applies to its text value, not to the element:
+        // move it there so the element stays null when absent. Only possible if the anonymous type belongs to this element alone.
+        if (!_configuration.UseShouldSerializeForDefaultValues && !isRequired && substitute == null && property.DefaultValue != null
+            && typeModel is ClassModel { IsAnonymous: true, IsMixed: false, DerivedTypes.Count: 0, BaseClass: not null and not ClassModel } textClass
+            && !string.IsNullOrEmpty(_configuration.TextValuePropertyName))
+        {
+            textClass.TextValueDefault = property.DefaultValue;
+            property.SetDefaultValue(null);
+        }
 
         if (property.IsArray && !_configuration.GenerateComplexTypesForCollections)
             property.Type.Namespace.Types.Remove(property.Type.Name);
@@ -1267,23 +1377,37 @@ internal class ModelBuilder
     public static List<DocumentationModel> GetDocumentation(XmlSchemaAnnotated annotated)
     {
         return annotated.Annotation == null ? []
-		        : [.. annotated.Annotation.Items.OfType<XmlSchemaDocumentation>()
-		        .Where(d => d.Markup?.Length > 0)
-		        .Select(d => d.Markup.Select(m => new DocumentationModel { Language = d.Language, Text = m.OuterXml }))
-		        .SelectMany(d => d)
-		        .Where(d => !string.IsNullOrEmpty(d.Text))];
+                : [.. annotated.Annotation.Items.OfType<XmlSchemaDocumentation>()
+                .Where(d => d.Markup?.Length > 0)
+                .Select(d => d.Markup.Select(m => new DocumentationModel { Language = d.Language, Text = m.OuterXml }))
+                .SelectMany(d => d)
+                .Where(d => !string.IsNullOrEmpty(d.Text))];
     }
 
     public IEnumerable<CodeNamespace> GenerateCode()
     {
         var hierarchy = NamespaceHierarchyItem.Build(Namespaces.Values.GroupBy(x => x.Name).SelectMany(x => x))
             .MarkAmbiguousNamespaceTypes();
+        var codeNamespaces = hierarchy.Flatten()
+            .Select(nhi => NamespaceModel.Generate(nhi.FullName, nhi.Models, _configuration))
+            .ToList();
+
+        if (HasSupportedFractionDigitsRestrictions())
+        {
+            var metadataHelperEmitter = new MetadataHelperEmitter(_configuration);
+            metadataHelperEmitter.EnsureFractionDigitsAttributeEmitted(codeNamespaces);
+        }
+
+        if (HasSupportedCollectionItemStringLengthRestrictions())
+        {
+            var metadataHelperEmitter = new MetadataHelperEmitter(_configuration);
+            metadataHelperEmitter.EnsureCollectionItemStringLengthAttributeEmitted(codeNamespaces);
+        }
 
         if (_configuration.GenerateChoiceGroupAttributes)
-            yield return GenerateChoiceGroupAttributeNamespace();
+            codeNamespaces.Insert(0, GenerateChoiceGroupAttributeNamespace());
 
-        foreach (var nhi in hierarchy.Flatten())
-            yield return NamespaceModel.Generate(nhi.FullName, nhi.Models, _configuration);
+        return codeNamespaces;
     }
 
     private CodeNamespace GenerateChoiceGroupAttributeNamespace()
@@ -1397,7 +1521,19 @@ internal class ModelBuilder
         return string.IsNullOrEmpty(configuration.NamespacePrefix)
             ? "XmlChoiceGroupAttributes"
             : configuration.NamespacePrefix;
+
     }
+
+    private bool HasSupportedFractionDigitsRestrictions()
+        => Types.Values
+            .OfType<SimpleModel>()
+            .Any(model => model.Restrictions.OfType<FractionDigitsRestrictionModel>().Any(restriction => restriction.IsSupported));
+
+    private bool HasSupportedCollectionItemStringLengthRestrictions()
+        => Types.Values
+            .OfType<ReferenceTypeModel>()
+            .SelectMany(model => model.Properties)
+            .Any(property => property.HasCollectionItemStringLengthAttribute);
 
     private string BuildNamespace(Uri source, string xmlNamespace)
     {
@@ -1407,44 +1543,4 @@ internal class ModelBuilder
             : throw new ArgumentException(string.Format("Namespace {0} not provided through map or generator.", xmlNamespace));
     }
 
-    /// <summary>
-    /// <para>
-    /// Follows the <see cref="XmlSchemaSimpleType.BaseXmlSchemaType"/> chain to find the item type
-    /// of an <c>xs:list</c>. Returns <c>null</c> if no list content is found.
-    /// </para>
-    /// <para>
-    /// Direct — the simpleType's Content is the list itself, matched on the first iteration:
-    /// <code>
-    ///   &lt;xs:simpleType&gt;
-    ///     &lt;xs:list itemType="my:enumType" /&gt;
-    ///   &lt;/xs:simpleType&gt;
-    /// </code>
-    /// </para>
-    /// <para>
-    /// Wrapped — the simpleType's Content is a restriction.
-    /// The restriction's <see cref="XmlSchemaSimpleType.BaseXmlSchemaType"/> points to an
-    /// anonymous inner simpleType whose Content is the list, reached on the second iteration:
-    /// <code>
-    ///   &lt;xs:simpleType&gt;
-    ///     &lt;xs:restriction&gt;
-    ///       &lt;xs:simpleType&gt;&lt;xs:list itemType="my:enumType" /&gt;&lt;/xs:simpleType&gt;
-    ///       &lt;xs:minLength value="1" /&gt;
-    ///     &lt;/xs:restriction&gt;
-    ///   &lt;/xs:simpleType&gt;
-    /// </code>
-    /// </para>
-    /// </summary>
-    /// <param name="type">The simple type to inspect.</param>
-    /// <returns>The resolved item type of the list, or <c>null</c> if no list content was found.</returns>
-    private static XmlSchemaSimpleType FindListItemType(XmlSchemaSimpleType type)
-    {
-        for (var current = type; current != null; current = current.BaseXmlSchemaType as XmlSchemaSimpleType)
-        {
-            if (current.Content is XmlSchemaSimpleTypeList list)
-            {
-                return list.BaseItemType ?? list.ItemType;
-            }
-        }
-        return null;
-    }
 }
