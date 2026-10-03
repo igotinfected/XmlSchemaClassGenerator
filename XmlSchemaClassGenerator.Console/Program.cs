@@ -59,6 +59,9 @@ static class Program
         var createGeneratedCodeAttributeVersion = true;
         var netCoreSpecificCode = false;
         var nullableReferenceAttributes = false;
+        var enableNullableDirective = false;
+        var generateRequiredModifier = false;
+        var generateChoiceGroupAttributes = false;
         var generateCommandLineArgs = true;
         var useArrayItemAttribute = true;
         var enumAsString = false;
@@ -71,6 +74,8 @@ static class Program
         var allowDtdParse = false;
         var omitXmlIncludeAttribute = false;
         var enumCollection = false;
+        var strictFixedValues = false;
+        var strictRangeBounds = false;
         NamingScheme? namingScheme = null;
         var forceUriScheme = "none";
 
@@ -164,6 +169,20 @@ with or without backing field initialization for collections
             { "gc|generatedCodeAttribute", "add version information to GeneratedCodeAttribute (default is true)", v => createGeneratedCodeAttributeVersion = v != null },
             { "nc|netCore", "generate .NET Core specific code that might not work with .NET Framework (default is false)", v => netCoreSpecificCode = v != null },
             { "nr|nullableReferenceAttributes", "generate attributes for nullable reference types (default is false)", v => nullableReferenceAttributes = v != null },
+            { "st|strict", "enable all strict compile-time enforcement options: --nd, --rm, --cg, --ecl, --fv, --rb (default is false). Individual flags after --strict override it, e.g. --strict --rm- enables everything except required modifier", v => {
+                var on = v != null;
+                enableNullableDirective = on;
+                generateRequiredModifier = on;
+                generateChoiceGroupAttributes = on;
+                enumCollection = on;
+                strictFixedValues = on;
+                strictRangeBounds = on;
+            } },
+            { "nd|nullableDirective", "emit #nullable enable and use native nullable reference type syntax (default is false)", v => enableNullableDirective = v != null },
+            { "rm|requiredModifier", "emit C# 11 required modifier on required properties (default is false)", v => generateRequiredModifier = v != null },
+            { "cg|choiceGroupAttributes", "emit [XmlChoiceGroup] attributes on choice element properties (default is false)", v => generateChoiceGroupAttributes = v != null },
+            { "fv|fixedValues", "generate read-only properties for fixed-value elements and attributes (default is false)", v => strictFixedValues = v != null },
+            { "rb|rangeBounds", "emit [Range] attributes even when only one bound (minInclusive or maxInclusive) is specified (default is false)", v => strictRangeBounds = v != null },
             { "ar|useArrayItemAttribute", "use ArrayItemAttribute for sequences with single elements (default is true)", v => useArrayItemAttribute = v != null },
             { "es|enumAsString", "Use string instead of enum for enumeration", v => enumAsString = v != null },
             { "dmb|disableMergeRestrictionsWithBase", "Disable merging of simple type restrictions with base type restrictions", v => disableMergeRestrictionsWithBase = v != null },
@@ -266,6 +285,9 @@ with or without backing field initialization for collections
             CreateGeneratedCodeAttributeVersion = createGeneratedCodeAttributeVersion,
             NetCoreSpecificCode = netCoreSpecificCode,
             EnableNullableReferenceAttributes = nullableReferenceAttributes,
+            EnableNullableDirective = enableNullableDirective,
+            GenerateRequiredModifier = generateRequiredModifier,
+            GenerateChoiceGroupAttributes = generateChoiceGroupAttributes,
             GenerateCommandLineArgumentsComment = generateCommandLineArgs,
             UseArrayItemAttribute = useArrayItemAttribute,
             EnumAsString = enumAsString,
@@ -276,6 +298,8 @@ with or without backing field initialization for collections
             AllowDtdParse = allowDtdParse,
             OmitXmlIncludeAttribute = omitXmlIncludeAttribute,
             EnumCollection = enumCollection,
+            GenerateStrictFixedValues = strictFixedValues,
+            GenerateStrictRangeBounds = strictRangeBounds,
             ForceUriScheme = forceUriScheme
         };
 

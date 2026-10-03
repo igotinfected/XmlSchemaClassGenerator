@@ -61,6 +61,13 @@ public class XmlTests(ITestOutputHelper output)
             AllowDtdParse = generatorPrototype.AllowDtdParse,
             OmitXmlIncludeAttribute = generatorPrototype.OmitXmlIncludeAttribute,
             EnumCollection = generatorPrototype.EnumCollection,
+            EnableNullableReferenceAttributes = generatorPrototype.EnableNullableReferenceAttributes,
+            EnableNullableDirective = generatorPrototype.EnableNullableDirective,
+            GenerateRequiredModifier = generatorPrototype.GenerateRequiredModifier,
+            GenerateDefaultValueAttribute = generatorPrototype.GenerateDefaultValueAttribute,
+            GenerateChoiceGroupAttributes = generatorPrototype.GenerateChoiceGroupAttributes,
+            GenerateStrictFixedValues = generatorPrototype.GenerateStrictFixedValues,
+            GenerateStrictRangeBounds = generatorPrototype.GenerateStrictRangeBounds,
         };
 
         gen.CommentLanguages.Clear();
@@ -622,6 +629,102 @@ public class XmlTests(ITestOutputHelper output)
             var expectedCollectionType = collectionType.MakeGenericType(enumType);
             Assert.Equal(expectedCollectionType, enumElemProp.PropertyType);
         }
+    }
+
+    [Fact]
+    public void TestEnumCollectionListElementHasStringProxy()
+    {
+        // xsd:list element properties with EnumCollection should generate:
+        // 1. A typed collection property with [XmlIgnore] for programmatic use
+        // 2. A string proxy property with [XmlElement] for correct space-separated serialization
+        var assembly = Compiler.Generate("ListEnumCollectionProxy", ListPattern, new Generator
+        {
+            GenerateNullables = true,
+            IntegerDataType = typeof(int),
+            DataAnnotationMode = DataAnnotationMode.All,
+            GenerateDesignerCategoryAttribute = false,
+            GenerateComplexTypesForCollections = true,
+            EntityFramework = false,
+            GenerateInterfaces = true,
+            NamespacePrefix = "List",
+            GenerateDescriptionAttribute = true,
+            TextValuePropertyName = "Value",
+            EnumCollection = true,
+        });
+
+        Assert.NotNull(assembly);
+
+        var myClassType = assembly.GetType("List.MyClass");
+        Assert.NotNull(myClassType);
+
+        var enumType = assembly.GetType("List.EnumType");
+        Assert.NotNull(enumType);
+
+        // The typed collection property should exist and have [XmlIgnore]
+        var enumElemProp = myClassType.GetProperty("EnumElem");
+        Assert.NotNull(enumElemProp);
+        Assert.True(enumElemProp.PropertyType.IsGenericType);
+        Assert.Equal(enumType, enumElemProp.PropertyType.GetGenericArguments()[0]);
+        Assert.NotNull(enumElemProp.GetCustomAttribute(typeof(XmlIgnoreAttribute)));
+
+        // The string proxy property should exist and have [XmlElement]
+        var proxyProp = myClassType.GetProperty("EnumElemXml");
+        Assert.NotNull(proxyProp);
+        Assert.Equal(typeof(string), proxyProp.PropertyType);
+        Assert.NotNull(proxyProp.GetCustomAttribute(typeof(XmlElementAttribute)));
+
+        // The proxy should be hidden from IntelliSense
+        var editorBrowsable = (System.ComponentModel.EditorBrowsableAttribute)proxyProp.GetCustomAttribute(typeof(System.ComponentModel.EditorBrowsableAttribute));
+        Assert.NotNull(editorBrowsable);
+        Assert.Equal(System.ComponentModel.EditorBrowsableState.Never, editorBrowsable.State);
+    }
+
+    [Fact]
+    public void TestEnumCollectionListElementSerializesAsSpaceSeparated()
+    {
+        // Verify that the string proxy property correctly converts between
+        // typed enum collection and space-separated XML string.
+        var assembly = Compiler.Generate("ListEnumCollectionSerialize", ListPattern, new Generator
+        {
+            GenerateNullables = true,
+            IntegerDataType = typeof(int),
+            DataAnnotationMode = DataAnnotationMode.All,
+            GenerateDesignerCategoryAttribute = false,
+            GenerateComplexTypesForCollections = true,
+            EntityFramework = false,
+            GenerateInterfaces = true,
+            NamespacePrefix = "List",
+            GenerateDescriptionAttribute = true,
+            TextValuePropertyName = "Value",
+            EnumCollection = true,
+        });
+
+        Assert.NotNull(assembly);
+
+        var myClassType = assembly.GetType("List.MyClass");
+        Assert.NotNull(myClassType);
+
+        var instance = Activator.CreateInstance(myClassType);
+
+        // Set the typed collection to two enum values
+        var enumType = assembly.GetType("List.EnumType");
+        Assert.NotNull(enumType);
+        var enumValues = Enum.GetValues(enumType);
+        Assert.True(enumValues.Length >= 2);
+
+        var listType = typeof(Collection<>).MakeGenericType(enumType);
+        var list = Activator.CreateInstance(listType);
+        listType.GetMethod("Add").Invoke(list, [enumValues.GetValue(0)]);
+        listType.GetMethod("Add").Invoke(list, [enumValues.GetValue(1)]);
+
+        myClassType.GetProperty("EnumElem").SetValue(instance, list);
+
+        // Read the proxy property — should be space-separated XML enum names
+        var proxyValue = (string)myClassType.GetProperty("EnumElemXml").GetValue(instance);
+        Assert.NotNull(proxyValue);
+        Assert.Contains(" ", proxyValue); // space-separated
+        Assert.DoesNotContain("\n", proxyValue); // single line
+        Assert.Equal(2, proxyValue.Split(' ').Length);
     }
 
     public static TheoryData<CodeTypeReferenceOptions, NamingScheme, Type> TestSimpleData() {
@@ -3458,4 +3561,2016 @@ namespace Test
         Assert.Equal("Base Value 2", basePropertyProp.GetValue(deserializedItem2));
         Assert.Equal(42, derivedProperty2Prop.GetValue(deserializedItem2));
     }
+
+    // -- EnableNullableDirective and GenerateRequiredModifier tests ----------------
+
+    private const string NullableAndRequiredXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:simpleType name=""StatusEnum"">
+        <xs:restriction base=""xs:string"">
+            <xs:enumeration value=""Active""/>
+            <xs:enumeration value=""Inactive""/>
+            <xs:enumeration value=""Pending""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""RequiredString"" type=""xs:string"" minOccurs=""1""/>
+            <xs:element name=""OptionalString"" type=""xs:string"" minOccurs=""0""/>
+            <xs:element name=""RequiredDate"" type=""xs:dateTime"" minOccurs=""1""/>
+            <xs:element name=""OptionalDate"" type=""xs:dateTime"" minOccurs=""0""/>
+            <xs:element name=""OptionalComplex"" type=""Child"" minOccurs=""0""/>
+            <xs:element name=""Items"" type=""xs:string"" minOccurs=""0"" maxOccurs=""unbounded""/>
+            <xs:element name=""RequiredInt"" type=""xs:int"" minOccurs=""1""/>
+            <xs:element name=""RequiredBool"" type=""xs:boolean"" minOccurs=""1""/>
+            <xs:element name=""RequiredStatus"" type=""StatusEnum"" minOccurs=""1""/>
+            <xs:element name=""OptionalStatus"" type=""StatusEnum"" minOccurs=""0""/>
+            <xs:element name=""RequiredWithDefault"" type=""xs:string"" minOccurs=""1"" default=""hello""/>
+            <xs:element name=""OptionalStringWithDefault"" type=""xs:string"" minOccurs=""0"" default=""fallback""/>
+        </xs:sequence>
+        <xs:attribute name=""RequiredAttr"" type=""xs:string"" use=""required""/>
+        <xs:attribute name=""OptionalAttr"" type=""xs:string"" use=""optional""/>
+    </xs:complexType>
+    <xs:complexType name=""Child"">
+        <xs:sequence>
+            <xs:element name=""Name"" type=""xs:string"" minOccurs=""1""/>
+        </xs:sequence>
+    </xs:complexType>
+    <xs:complexType name=""TextValue"">
+        <xs:simpleContent>
+            <xs:extension base=""xs:string"">
+                <xs:attribute name=""Lang"" type=""xs:string"" use=""optional""/>
+            </xs:extension>
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:simpleType name=""NonEmptyString"">
+        <xs:restriction base=""xs:string"">
+            <xs:minLength value=""1""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:complexType name=""RequiredTextValue"">
+        <xs:simpleContent>
+            <xs:extension base=""NonEmptyString"">
+                <xs:attribute name=""Lang"" type=""xs:string"" use=""optional""/>
+            </xs:extension>
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:complexType name=""EnumTextValue"">
+        <xs:simpleContent>
+            <xs:extension base=""StatusEnum"">
+                <xs:attribute name=""Source"" type=""xs:string"" use=""optional""/>
+            </xs:extension>
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:complexType name=""DoubleTextValue"">
+        <xs:simpleContent>
+            <xs:extension base=""xs:double"">
+                <xs:attribute name=""Unit"" type=""xs:string"" use=""optional""/>
+            </xs:extension>
+        </xs:simpleContent>
+    </xs:complexType>
+</xs:schema>";
+
+    /// <summary>
+    /// Extracts the body of a specific class from the generated code content.
+    /// Matches from "class ClassName" to the next class declaration or end of content.
+    /// </summary>
+    private static string ExtractClassBlock(string content, string className)
+    {
+        var pattern = $@"partial class {Regex.Escape(className)}\b.*?(?=partial class |\z)";
+        var match = Regex.Match(content, pattern, RegexOptions.Singleline);
+        Assert.True(match.Success, $"Class '{className}' not found in generated content.");
+        return match.Value;
+    }
+
+    private static Generator CreateNullableRequiredGenerator(
+        bool enableNullableDirective = false,
+        bool generateRequiredModifier = false,
+        bool enableNullableReferenceAttributes = false)
+    {
+        return new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            EnableNullableReferenceAttributes = enableNullableReferenceAttributes,
+            EnableNullableDirective = enableNullableDirective,
+            GenerateRequiredModifier = generateRequiredModifier,
+            GenerateNullables = true,
+            DataAnnotationMode = DataAnnotationMode.All,
+            NetCoreSpecificCode = true,
+        };
+    }
+
+    [Fact]
+    public void TestRequiredModifierOnRequiredElements()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierOnRequiredElements), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Required string element: gets 'required' modifier
+        Assert.Contains("public required string RequiredString", content);
+
+        // Required dateTime element: gets 'required' modifier
+        Assert.Contains("public required System.DateTime RequiredDate", content);
+
+        // Required attribute: gets 'required' modifier
+        Assert.Contains("public required string RequiredAttr", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierNotOnOptionalElements()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierNotOnOptionalElements), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Optional string element: no 'required' modifier
+        Assert.DoesNotContain("required string OptionalString", content);
+        Assert.DoesNotContain("required string OptionalAttr", content);
+
+        // Optional complex element: no 'required' modifier
+        Assert.DoesNotContain("required Test.Child OptionalComplex", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierNotOnCollections()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierNotOnCollections), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Collection property: never gets 'required' modifier
+        Assert.DoesNotContain("required", content.Split('\n')
+            .FirstOrDefault(l => l.Contains("Items")) ?? "");
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyIsNullableWhenUnconstrained()
+    {
+        // TextValue extends xs:string with no minLength — text body is optional.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyIsNullableWhenUnconstrained), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var textValueBlock = ExtractClassBlock(content, "TextValue");
+
+        // Unconstrained simpleContent: nullable, not required.
+        Assert.Contains("public string? Value", textValueBlock);
+        Assert.DoesNotContain("required string Value", textValueBlock);
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyIsRequiredWhenConstrainedByMinLength()
+    {
+        // RequiredTextValue extends NonEmptyString (minLength=1) — text body is required.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyIsRequiredWhenConstrainedByMinLength), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var requiredBlock = ExtractClassBlock(content, "RequiredTextValue");
+
+        // Constrained simpleContent: required, not nullable.
+        Assert.Contains("public required string Value", requiredBlock);
+        Assert.DoesNotContain("string? Value", requiredBlock);
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyPlainStringWhenNullableDirectiveOff()
+    {
+        // Without EnableNullableDirective, unconstrained Value is a plain string.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: false,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyPlainStringWhenNullableDirectiveOff), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var textValueBlock = ExtractClassBlock(content, "TextValue");
+
+        Assert.Contains("public string Value", textValueBlock);
+        Assert.DoesNotContain("string? Value", textValueBlock);
+        Assert.DoesNotContain("required string Value", textValueBlock);
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyRequiredWhenConstrainedAndNullableDirectiveOff()
+    {
+        // Constrained text value gets required even without nullable directive.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: false,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyRequiredWhenConstrainedAndNullableDirectiveOff), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var requiredBlock = ExtractClassBlock(content, "RequiredTextValue");
+
+        Assert.Contains("public required string Value", requiredBlock);
+        Assert.DoesNotContain("string? Value", requiredBlock);
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyNoBothFlagsOff()
+    {
+        // Both flags off: always plain string, regardless of constraints.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: false,
+            generateRequiredModifier: false);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyNoBothFlagsOff), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Both TextValue and RequiredTextValue should be plain string.
+        foreach (var className in new[] { "TextValue", "RequiredTextValue" })
+        {
+            var block = ExtractClassBlock(content, className);
+            Assert.Contains("public string Value", block);
+            Assert.DoesNotContain("string? Value", block);
+            Assert.DoesNotContain("required string Value", block);
+        }
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyEnumBaseIsNeverNullable()
+    {
+        // EnumTextValue extends StatusEnum — value types must NOT get '?' suffix
+        // because Nullable<T> + [XmlText] causes XmlSerializer to crash.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyEnumBaseIsNeverNullable), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "EnumTextValue");
+
+        // Enum value type: never nullable, never Nullable<T>.
+        // The type may or may not be namespace-qualified depending on CodeDom output.
+        Assert.Contains("StatusEnum Value", block);
+        Assert.DoesNotContain("StatusEnum? Value", block);
+        Assert.DoesNotContain("Nullable", block);
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyDoubleBaseIsNeverNullable()
+    {
+        // DoubleTextValue extends xs:double — value types must NOT get '?' suffix
+        // because Nullable<T> + [XmlText] causes XmlSerializer to crash.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyDoubleBaseIsNeverNullable), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "DoubleTextValue");
+
+        // Double value type: never nullable.
+        Assert.Contains("public double Value", block);
+        Assert.DoesNotContain("double? Value", block);
+        Assert.DoesNotContain("Nullable", block);
+    }
+
+    [Fact]
+    public void TestXmlTextValuePropertyStringBaseStillNullable()
+    {
+        // Verify that the value-type guard does NOT affect string (reference type) behavior.
+        // TextValue extends xs:string with no minLength — should still be nullable.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestXmlTextValuePropertyStringBaseStillNullable), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "TextValue");
+
+        // String reference type: still nullable when unconstrained.
+        Assert.Contains("public string? Value", block);
+        Assert.DoesNotContain("required string Value", block);
+    }
+
+    [Fact]
+    public void TestNullableDirectiveUsesQuestionMarkSyntax()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+
+        var contents = ConvertXml(nameof(TestNullableDirectiveUsesQuestionMarkSyntax), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Optional string element: uses '?' suffix instead of [AllowNull][MaybeNull]
+        Assert.Contains("string? OptionalString", content);
+
+        // Optional complex element: uses '?' suffix
+        Assert.Contains("Child? OptionalComplex", content);
+
+        // [AllowNull] and [MaybeNull] should NOT be present for nullable properties
+        Assert.DoesNotContain("AllowNullAttribute", content);
+        Assert.DoesNotContain("MaybeNullAttribute", content);
+    }
+
+    [Fact]
+    public void TestNullableDirectiveOffUsesAttributes()
+    {
+        // When EnableNullableDirective is off but EnableNullableReferenceAttributes is on,
+        // the old [AllowNull]/[MaybeNull] attributes should be used.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableReferenceAttributes: true);
+
+        var contents = ConvertXml(nameof(TestNullableDirectiveOffUsesAttributes), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Should use attributes, not '?' syntax
+        Assert.Contains("AllowNullAttribute", content);
+        Assert.Contains("MaybeNullAttribute", content);
+        Assert.DoesNotContain("System.String?", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierOffDoesNotEmitRequired()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: false);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierOffDoesNotEmitRequired), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // 'required' keyword should not appear anywhere in the generated code
+        Assert.DoesNotContain("required ", content);
+    }
+
+    [Fact]
+    public void TestNullableDirectiveInjectsDirectiveInFileOutput()
+    {
+        // This test uses the file-based output pipeline to verify
+        // that #nullable enable is injected into the generated file.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestNullableDirectiveInjectsDirectiveInFileOutput)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(NullableAndRequiredXsd) });
+
+        // Read the generated files and verify #nullable enable is present
+        foreach (var file in output.Files)
+        {
+            var fileContent = File.ReadAllText(file);
+            Assert.Contains("#nullable enable", fileContent);
+            // Should come after the auto-generated comment
+            var directiveIndex = fileContent.IndexOf("#nullable enable", StringComparison.Ordinal);
+            var autoGenIndex = fileContent.IndexOf("</auto-generated>", StringComparison.Ordinal);
+            Assert.True(directiveIndex > autoGenIndex,
+                $"#nullable enable should appear after </auto-generated> in {Path.GetFileName(file)}");
+        }
+    }
+
+    [Fact]
+    public void TestNullableDirectiveNotInjectedWhenDisabled()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: false);
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestNullableDirectiveNotInjectedWhenDisabled)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(NullableAndRequiredXsd) });
+
+        foreach (var file in output.Files)
+        {
+            var fileContent = File.ReadAllText(file);
+            Assert.DoesNotContain("#nullable enable", fileContent);
+        }
+    }
+
+    [Fact]
+    public void TestNullableCollectionUsesQuestionMarkSuffix()
+    {
+        // Generic collection types (e.g. Collection<string>) now correctly get the '?' suffix
+        // because WrapTypeRef renders the type via CSharpCodeProvider first, then creates a
+        // literal CodeTypeReference that CodeDom outputs verbatim. No attribute fallback needed.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+        generator.CollectionSettersMode = CollectionSettersMode.Init;
+        generator.CollectionType = typeof(System.Collections.ObjectModel.Collection<>);
+
+        var contents = ConvertXml(nameof(TestNullableCollectionUsesQuestionMarkSuffix), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // The collection backing field should have '?' on its type
+        var lines = content.Split('\n');
+        var backingFieldLine = lines.FirstOrDefault(l => l.Contains("_items") && l.Contains("private"));
+        Assert.NotNull(backingFieldLine);
+        Assert.Contains("?", backingFieldLine);
+
+        // No [AllowNull]/[MaybeNull] attribute fallback when EnableNullableDirective is on
+        Assert.DoesNotContain("AllowNullAttribute", content);
+        Assert.DoesNotContain("MaybeNullAttribute", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierOnRequiredValueTypes()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierOnRequiredValueTypes), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Required int element: gets 'required' modifier
+        Assert.Contains("public required int RequiredInt", content);
+
+        // Required bool element: gets 'required' modifier
+        Assert.Contains("public required bool RequiredBool", content);
+    }
+
+    [Fact]
+    public void TestRequiredReferenceTypeNotNullable()
+    {
+        // When both flags are on, a required string should be 'required string',
+        // NOT 'required string?' — required properties are non-nullable.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredReferenceTypeNotNullable), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Required string must NOT have '?' suffix
+        Assert.Contains("public required string RequiredString", content);
+        Assert.DoesNotContain("required string? RequiredString", content);
+
+        // Required attribute must NOT have '?' suffix
+        Assert.Contains("public required string RequiredAttr", content);
+        Assert.DoesNotContain("required string? RequiredAttr", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierWithoutNullableDirective()
+    {
+        // GenerateRequiredModifier works independently of EnableNullableDirective.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: false,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierWithoutNullableDirective), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // 'required' should still be emitted on required properties
+        Assert.Contains("public required string RequiredString", content);
+        Assert.Contains("public required int RequiredInt", content);
+        Assert.Contains("public required string RequiredAttr", content);
+
+        // '?' syntax should NOT be used (EnableNullableDirective is off)
+        Assert.DoesNotContain("string?", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierWithDefaultValue()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierWithDefaultValue), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // A required element with a default value should still get 'required'.
+        // It takes the DefaultValue != null code path in PropertyModel.AddMembersTo.
+        Assert.Contains("public required string RequiredWithDefault", content);
+    }
+
+    [Fact]
+    public void TestRequiredModifierOnRequiredEnum()
+    {
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierOnRequiredEnum), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Required enum element: gets 'required' modifier
+        Assert.Contains("public required StatusEnum RequiredStatus", content);
+
+        // Optional enum element: no 'required' modifier
+        Assert.DoesNotContain("required StatusEnum OptionalStatus", content);
+    }
+
+    [Fact]
+    public void TestNullableDirectiveAndRequiredCompilationRoundTrip()
+    {
+        // Generate files with both flags on and compile via Roslyn to verify
+        // the generated code is valid C# with zero errors and zero warnings.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestNullableDirectiveAndRequiredCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(NullableAndRequiredXsd) });
+
+        // CompileFiles reads the generated .cs files (which include #nullable enable)
+        // and compiles them with the latest C# language version.
+        // It asserts zero errors and zero warnings internally.
+        var assembly = Compiler.CompileFiles(nameof(TestNullableDirectiveAndRequiredCompilationRoundTrip), output.Files);
+
+        Assert.NotNull(assembly);
+
+        // Verify the types exist in the compiled assembly
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+
+        var childType = assembly.GetType("Test.Child");
+        Assert.NotNull(childType);
+
+        var textValueType = assembly.GetType("Test.TextValue");
+        Assert.NotNull(textValueType);
+
+        var enumType = assembly.GetType("Test.StatusEnum");
+        Assert.NotNull(enumType);
+    }
+
+    [Fact]
+    public void TestNullableDirectiveOnInterfaceMembers()
+    {
+        // When GenerateInterfaces and EnableNullableDirective are both on,
+        // interface members for optional reference types should use '?' syntax
+        // to match the implementing class.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+        generator.GenerateInterfaces = true;
+
+        var contents = ConvertXml(nameof(TestNullableDirectiveOnInterfaceMembers), NullableAndRequiredInterfaceXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Extract the interface section (from 'public partial interface' to the end of content)
+        var idx = content.IndexOf("public partial interface", StringComparison.Ordinal);
+        Assert.True(idx >= 0, "Expected to find 'public partial interface' in generated code");
+        var interfaceSection = content.Substring(idx);
+
+        // The interface should declare optional string property with '?'
+        Assert.Contains("string? OptionalLabel", interfaceSection);
+        // The required string property should NOT have '?'
+        Assert.DoesNotContain("string? RequiredId", interfaceSection);
+    }
+
+    [Fact]
+    public void TestRequiredModifierSuppressesRequiredAttribute()
+    {
+        // When GenerateRequiredModifier is on, the C# 11 'required' modifier supersedes
+        // [RequiredAttribute] — the attribute should not be emitted.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var contents = ConvertXml(nameof(TestRequiredModifierSuppressesRequiredAttribute), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // 'required' keyword should be present
+        Assert.Contains("public required string RequiredString", content);
+
+        // [RequiredAttribute] should NOT be present
+        Assert.DoesNotContain("RequiredAttribute", content);
+        Assert.DoesNotContain("AllowEmptyStrings", content);
+    }
+
+    [Fact]
+    public void TestRequiredAttributeStillEmittedWithoutRequiredModifier()
+    {
+        // When GenerateRequiredModifier is off, [RequiredAttribute] should still be emitted
+        // as before — this is the pre-existing behavior.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: false);
+
+        var contents = ConvertXml(nameof(TestRequiredAttributeStillEmittedWithoutRequiredModifier), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // No 'required' keyword
+        Assert.DoesNotContain("public required ", content);
+
+        // [RequiredAttribute] should be present on required properties
+        Assert.Contains("RequiredAttribute", content);
+        Assert.Contains("AllowEmptyStrings", content);
+    }
+
+    // XSD that exercises generic collection types and array types for nullable rendering.
+    // - Tags: optional unbounded string elements (→ List<string> or Collection<string>)
+    // - Data: optional base64Binary (→ byte[])
+    // - Name: required string (control — should NOT be nullable)
+    private const string NullableCollectionAndArrayXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:complexType name=""Container"">
+        <xs:sequence>
+            <xs:element name=""Name"" type=""xs:string"" minOccurs=""1""/>
+            <xs:element name=""Tags"" type=""xs:string"" minOccurs=""0"" maxOccurs=""unbounded""/>
+            <xs:element name=""Data"" type=""xs:base64Binary"" minOccurs=""0""/>
+            <xs:element name=""OptionalChild"" type=""Nested"" minOccurs=""0""/>
+        </xs:sequence>
+    </xs:complexType>
+    <xs:complexType name=""Nested"">
+        <xs:sequence>
+            <xs:element name=""Values"" type=""xs:int"" minOccurs=""0"" maxOccurs=""unbounded""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestNullableGenericCollectionRendersCorrectSyntax()
+    {
+        // Verify that optional collection types produce "Collection<string>?" and NOT
+        // the broken "Collection<>?<string>" that CodeDom produces when '?' is appended
+        // directly to the BaseType of a generic CodeTypeReference.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+        generator.CollectionSettersMode = CollectionSettersMode.Init;
+        generator.CollectionType = typeof(System.Collections.ObjectModel.Collection<>);
+
+        var contents = ConvertXml(nameof(TestNullableGenericCollectionRendersCorrectSyntax), NullableCollectionAndArrayXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Should contain the correct nullable collection syntax
+        Assert.Contains("Collection<string>?", content);
+
+        // Must NOT contain the broken CodeDom output
+        Assert.DoesNotContain("Collection<>?", content);
+        Assert.DoesNotContain("<>?<", content);
+    }
+
+    [Fact]
+    public void TestNullableListCollectionRendersCorrectSyntax()
+    {
+        // Same test but with List<T> which is the more common collection type.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+        generator.CollectionSettersMode = CollectionSettersMode.Init;
+        // CollectionType defaults to Collection<>, so set it to List<> explicitly
+        generator.CollectionType = typeof(System.Collections.Generic.List<>);
+
+        var contents = ConvertXml(nameof(TestNullableListCollectionRendersCorrectSyntax), NullableCollectionAndArrayXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Should contain the correct nullable List<T> syntax for string collections
+        // (string is a reference type so IsNullableReferenceType is true → gets '?')
+        Assert.Contains("List<string>?", content);
+
+        // List<int> does NOT get '?' because the element type (int) is a value type,
+        // so IsNullableReferenceType is false for that property. This matches upstream behavior.
+        Assert.DoesNotContain("List<int>?", content);
+
+        // Must NOT contain broken CodeDom output
+        Assert.DoesNotContain("List<>?", content);
+        Assert.DoesNotContain("<>?<", content);
+    }
+
+    [Fact]
+    public void TestNullableByteArrayRendersCorrectSyntax()
+    {
+        // Verify that optional byte[] (from xs:base64Binary) produces "byte[]?" and NOT
+        // "byte?[]" (which would mean "array of nullable bytes" — wrong semantics).
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+
+        var contents = ConvertXml(nameof(TestNullableByteArrayRendersCorrectSyntax), NullableCollectionAndArrayXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Should contain "byte[]?" for optional base64Binary
+        Assert.Contains("byte[]?", content);
+
+        // Must NOT contain "byte?[]" (nullable element instead of nullable array)
+        Assert.DoesNotContain("byte?[]", content);
+    }
+
+    [Fact]
+    public void TestNullableCollectionAndArrayCompilationRoundTrip()
+    {
+        // Compilation round-trip: generate files with EnableNullableDirective and
+        // Collection<T> with init setters, then compile via Roslyn.
+        // This catches any broken type syntax that slips past string assertions.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+        generator.CollectionSettersMode = CollectionSettersMode.Init;
+        generator.CollectionType = typeof(System.Collections.ObjectModel.Collection<>);
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestNullableCollectionAndArrayCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(NullableCollectionAndArrayXsd) });
+
+        var assembly = Compiler.CompileFiles(nameof(TestNullableCollectionAndArrayCompilationRoundTrip), output.Files);
+
+        Assert.NotNull(assembly);
+
+        var containerType = assembly.GetType("Test.Container");
+        Assert.NotNull(containerType);
+
+        var nestedType = assembly.GetType("Test.Nested");
+        Assert.NotNull(nestedType);
+    }
+
+    [Fact]
+    public void TestOptionalReferenceTypeWithDefaultIsNullable()
+    {
+        // Issue: optional reference types with a default value (minOccurs=0 + default="...")
+        // were not getting the '?' suffix because IsNullable requires DefaultValue == null.
+        // Under #nullable enable, these properties must be nullable — the element can be absent
+        // from XML, and users should be able to assign null without a compiler warning.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true);
+
+        var contents = ConvertXml(nameof(TestOptionalReferenceTypeWithDefaultIsNullable), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // OptionalStringWithDefault: minOccurs=0, default="fallback" → should be string?
+        Assert.Contains("string? OptionalStringWithDefault", content);
+
+        // Control: RequiredWithDefault (minOccurs=1) should NOT be nullable
+        Assert.DoesNotContain("string? RequiredWithDefault", content);
+
+        // Control: OptionalString (no default) should still be nullable
+        Assert.Contains("string? OptionalString", content);
+    }
+
+    [Fact]
+    public void TestOptionalReferenceTypeWithDefaultNotNullableWhenDirectiveOff()
+    {
+        // When EnableNullableDirective is off, the default-value + optional combination
+        // should NOT add '?' (preserves upstream behavior).
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: false);
+
+        var contents = ConvertXml(nameof(TestOptionalReferenceTypeWithDefaultNotNullableWhenDirectiveOff), NullableAndRequiredXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // No '?' syntax should appear at all when the directive is off
+        Assert.DoesNotContain("string?", content);
+        Assert.DoesNotContain("Child?", content);
+    }
+
+    [Fact]
+    public void TestOptionalReferenceTypeWithDefaultCompilationRoundTrip()
+    {
+        // Compilation round-trip: optional ref types with defaults should compile cleanly.
+        var generator = CreateNullableRequiredGenerator(
+            enableNullableDirective: true,
+            generateRequiredModifier: true);
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestOptionalReferenceTypeWithDefaultCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(NullableAndRequiredXsd) });
+
+        var assembly = Compiler.CompileFiles(nameof(TestOptionalReferenceTypeWithDefaultCompilationRoundTrip), output.Files);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+    }
+
+    private const string NullableAndRequiredInterfaceXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:attributeGroup name=""CommonAttrs"">
+        <xs:attribute name=""RequiredId"" type=""xs:string"" use=""required""/>
+        <xs:attribute name=""OptionalLabel"" type=""xs:string"" use=""optional""/>
+    </xs:attributeGroup>
+    <xs:complexType name=""ItemA"">
+        <xs:sequence>
+            <xs:element name=""Name"" type=""xs:string"" minOccurs=""1""/>
+        </xs:sequence>
+        <xs:attributeGroup ref=""CommonAttrs""/>
+    </xs:complexType>
+</xs:schema>";
+
+    // -- GenerateChoiceGroupAttributes tests ----------------
+
+    private const string ChoiceGroupXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:simpleType name=""PercentageType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:minInclusive value=""0""/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- Case 1: Simple choice (each arm = single element) -->
+    <xs:complexType name=""SimpleChoice"">
+        <xs:sequence>
+            <xs:element name=""Name"" type=""xs:string"" minOccurs=""1""/>
+            <xs:choice>
+                <xs:element name=""Count"" type=""xs:integer""/>
+                <xs:element name=""Percentage"" type=""PercentageType""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 2: Multiple choice groups in the same type -->
+    <xs:complexType name=""MultipleChoices"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:element name=""Alpha"" type=""xs:string""/>
+                <xs:element name=""Beta"" type=""xs:string""/>
+            </xs:choice>
+            <xs:element name=""Middle"" type=""xs:string"" minOccurs=""0""/>
+            <xs:choice>
+                <xs:element name=""Gamma"" type=""xs:string""/>
+                <xs:element name=""Delta"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 3: Choice with sequence arm -->
+    <xs:complexType name=""ChoiceWithSequence"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:element name=""Simple"" type=""xs:string""/>
+                <xs:sequence>
+                    <xs:element name=""PartA"" type=""xs:string""/>
+                    <xs:element name=""PartB"" type=""xs:string""/>
+                </xs:sequence>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 4: Both arms are sequences -->
+    <xs:complexType name=""BothArmsSequences"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:sequence>
+                    <xs:element name=""StartRef"" type=""xs:string""/>
+                    <xs:element name=""StartName"" type=""xs:string""/>
+                </xs:sequence>
+                <xs:sequence>
+                    <xs:element name=""EndRef"" type=""xs:string""/>
+                    <xs:element name=""EndName"" type=""xs:string""/>
+                </xs:sequence>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 5: Nested choice-in-choice (direct) — should flatten -->
+    <xs:complexType name=""NestedChoice"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:choice>
+                    <xs:element name=""A"" type=""xs:string""/>
+                    <xs:element name=""B"" type=""xs:string""/>
+                </xs:choice>
+                <xs:element name=""C"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 6: Choice inside sequence inside choice — NOT flattened -->
+    <xs:complexType name=""ChoiceInSequenceInChoice"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:sequence>
+                    <xs:choice>
+                        <xs:element name=""InnerX"" type=""xs:string""/>
+                        <xs:element name=""InnerY"" type=""xs:string""/>
+                    </xs:choice>
+                    <xs:element name=""Extra"" type=""xs:string""/>
+                </xs:sequence>
+                <xs:element name=""Standalone"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 7: Choice inside sequence inside choice where inner properties also belong to the outer arm -->
+    <xs:complexType name=""NestedChoiceMemberships"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:sequence>
+                    <xs:choice>
+                        <xs:element name=""NestedInnerX"" type=""xs:string""/>
+                        <xs:element name=""NestedInnerY"" type=""xs:string""/>
+                    </xs:choice>
+                    <xs:element name=""NestedExtra"" type=""xs:string""/>
+                </xs:sequence>
+                <xs:element name=""NestedStandalone"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 8: Optional choice group should emit non-required metadata -->
+    <xs:complexType name=""OptionalChoice"">
+        <xs:sequence>
+            <xs:choice minOccurs=""0"">
+                <xs:element name=""OptionalAlpha"" type=""xs:string""/>
+                <xs:element name=""OptionalBeta"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 9: Optional parent sequence with required choice should emit non-required metadata -->
+    <xs:complexType name=""OptionalParentRequiredChoice"">
+        <xs:sequence minOccurs=""0"">
+            <xs:choice>
+                <xs:element name=""ParentOptionalAlpha"" type=""xs:string""/>
+                <xs:element name=""ParentOptionalBeta"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 10: Required group ref reached through an optional outer choice -->
+    <xs:group name=""OptionalOuterChoiceGroupRefGroup"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:element name=""GroupNestedAlpha"" type=""xs:string""/>
+                <xs:element name=""GroupNestedBeta"" type=""xs:string""/>
+            </xs:choice>
+            <xs:element name=""GroupNestedExtra"" type=""xs:string""/>
+        </xs:sequence>
+    </xs:group>
+
+    <xs:complexType name=""OptionalOuterChoiceRequiredGroupRef"">
+        <xs:sequence>
+            <xs:choice minOccurs=""0"">
+                <xs:group ref=""OptionalOuterChoiceGroupRefGroup""/>
+                <xs:element name=""GroupRefStandalone"" type=""xs:string""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 11: Required choice with entirely optional arms is emptiable -->
+    <xs:complexType name=""EmptiableChoice"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:element name=""OptionalFirst"" type=""xs:string"" minOccurs=""0""/>
+                <xs:element name=""OptionalSecond"" type=""xs:string"" minOccurs=""0""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 12: No choice (control — should have no attributes) -->
+    <xs:complexType name=""NoChoice"">
+        <xs:sequence>
+            <xs:element name=""Foo"" type=""xs:string""/>
+            <xs:element name=""Bar"" type=""xs:string""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    private static Generator CreateChoiceGroupGenerator()
+    {
+        return new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+            DataAnnotationMode = DataAnnotationMode.All,
+            NetCoreSpecificCode = true,
+            GenerateChoiceGroupAttributes = true,
+        };
+    }
+
+    [Fact]
+    public void TestChoiceGroupSimpleChoiceEmitsAttributes()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupSimpleChoiceEmitsAttributes), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "SimpleChoice");
+
+        // Count and Percentage should have XmlChoiceGroup attributes with same groupId, different armIds.
+        Assert.Matches(@"XmlChoiceGroupAttribute\(\d+, 0, IsRequired=true\).*Count", block.Replace("\n", " "));
+        Assert.Matches(@"XmlChoiceGroupAttribute\(\d+, 1, IsRequired=true\).*Percentage", block.Replace("\n", " "));
+
+        // Name is not in a choice — should NOT have the attribute.
+        var nameLines = block.Split('\n').Where(l => l.Contains("\"Name\"") || l.Contains("Name {")).ToList();
+        Assert.DoesNotContain("XmlChoiceGroup", string.Join(" ", nameLines));
+    }
+
+    [Fact]
+    public void TestChoiceGroupMultipleGroupsHaveDifferentIds()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupMultipleGroupsHaveDifferentIds), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "MultipleChoices");
+
+        // Extract all XmlChoiceGroupAttribute occurrences.
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+), IsRequired=(?:true|false)\)");
+        Assert.Equal(4, matches.Count); // Alpha, Beta, Gamma, Delta
+
+        var groupIds = matches.Select(m => int.Parse(m.Groups[1].Value)).Distinct().ToList();
+        Assert.Equal(2, groupIds.Count); // Two distinct group IDs
+
+        // Alpha and Beta share a group, Gamma and Delta share a different group.
+        var group1Arms = matches.Where(m => int.Parse(m.Groups[1].Value) == groupIds[0])
+            .Select(m => int.Parse(m.Groups[2].Value)).OrderBy(x => x).ToList();
+        var group2Arms = matches.Where(m => int.Parse(m.Groups[1].Value) == groupIds[1])
+            .Select(m => int.Parse(m.Groups[2].Value)).OrderBy(x => x).ToList();
+        Assert.Equal([0, 1], group1Arms);
+        Assert.Equal([0, 1], group2Arms);
+
+        // Middle is not in a choice — should NOT have the attribute.
+        Assert.DoesNotContain("XmlChoiceGroup", block.Split('\n')
+            .FirstOrDefault(l => l.Contains("\"Middle\"")) ?? "");
+    }
+
+    [Fact]
+    public void TestChoiceGroupSequenceArmsShareArmId()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupSequenceArmsShareArmId), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "ChoiceWithSequence");
+
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+), IsRequired=(?:true|false)\)");
+        Assert.Equal(3, matches.Count); // Simple, PartA, PartB
+
+        // All should share the same groupId.
+        var groupIds = matches.Select(m => int.Parse(m.Groups[1].Value)).Distinct().ToList();
+        Assert.Single(groupIds);
+
+        // Simple should be arm 0. PartA and PartB should share arm 1 (from the sequence).
+        var arms = matches.Select(m => (
+            arm: int.Parse(m.Groups[2].Value),
+            // Find the property name after this attribute
+            text: block.Substring(m.Index)
+        )).ToList();
+
+        // Simple = arm 0
+        var simpleArm = matches.First(m => block.Substring(m.Index, 100).Contains("Simple"));
+        Assert.Equal("0", simpleArm.Groups[2].Value);
+
+        // PartA and PartB = arm 1
+        var partAArm = matches.First(m => block.Substring(m.Index, 100).Contains("PartA"));
+        var partBArm = matches.First(m => block.Substring(m.Index, 100).Contains("PartB"));
+        Assert.Equal("1", partAArm.Groups[2].Value);
+        Assert.Equal("1", partBArm.Groups[2].Value);
+    }
+
+    [Fact]
+    public void TestChoiceGroupBothArmsSequences()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupBothArmsSequences), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "BothArmsSequences");
+
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+), IsRequired=(?:true|false)\)");
+        Assert.Equal(4, matches.Count); // StartRef, StartName, EndRef, EndName
+
+        // All share the same groupId.
+        var groupIds = matches.Select(m => int.Parse(m.Groups[1].Value)).Distinct().ToList();
+        Assert.Single(groupIds);
+
+        // StartRef + StartName = arm 0, EndRef + EndName = arm 1.
+        var startRefArm = matches.First(m => block.Substring(m.Index, 100).Contains("StartRef"));
+        var startNameArm = matches.First(m => block.Substring(m.Index, 100).Contains("StartName"));
+        var endRefArm = matches.First(m => block.Substring(m.Index, 100).Contains("EndRef"));
+        var endNameArm = matches.First(m => block.Substring(m.Index, 100).Contains("EndName"));
+
+        Assert.Equal(startRefArm.Groups[2].Value, startNameArm.Groups[2].Value); // same arm
+        Assert.Equal(endRefArm.Groups[2].Value, endNameArm.Groups[2].Value);     // same arm
+        Assert.NotEqual(startRefArm.Groups[2].Value, endRefArm.Groups[2].Value); // different arms
+    }
+
+    [Fact]
+    public void TestChoiceGroupNestedChoiceFlattens()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupNestedChoiceFlattens), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "NestedChoice");
+
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+), IsRequired=(?:true|false)\)");
+        Assert.Equal(3, matches.Count); // A, B, C
+
+        // All should share the same groupId (nested choice flattened).
+        var groupIds = matches.Select(m => int.Parse(m.Groups[1].Value)).Distinct().ToList();
+        Assert.Single(groupIds);
+
+        // A, B, C should all have distinct arm IDs.
+        var armIds = matches.Select(m => int.Parse(m.Groups[2].Value)).OrderBy(x => x).ToList();
+        Assert.Equal(3, armIds.Distinct().Count());
+    }
+
+    [Fact]
+    public void TestChoiceGroupChoiceInSequenceInChoiceNotFlattened()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupChoiceInSequenceInChoiceNotFlattened), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "ChoiceInSequenceInChoice");
+
+        var matches = Regex.Matches(block, @"XmlChoiceGroupAttribute\((\d+), (\d+), IsRequired=(?:true|false)\)");
+        // InnerX, InnerY (outer + inner choice groups), Extra (outer arm 0), Standalone (outer arm 1)
+        Assert.Equal(6, matches.Count);
+
+        // Should have TWO distinct group IDs (inner choice is NOT flattened).
+        var groupIds = matches.Select(m => int.Parse(m.Groups[1].Value)).Distinct().OrderBy(x => x).ToList();
+        Assert.Equal(2, groupIds.Count);
+
+        // InnerX and InnerY have the inner group ID with different arms.
+        var innerXMatch = matches.First(m => block.Substring(m.Index, 120).Contains("InnerX"));
+        var innerYMatch = matches.First(m => block.Substring(m.Index, 120).Contains("InnerY"));
+        Assert.Equal(innerXMatch.Groups[1].Value, innerYMatch.Groups[1].Value); // same group
+        Assert.NotEqual(innerXMatch.Groups[2].Value, innerYMatch.Groups[2].Value); // different arms
+
+        // Extra and Standalone have the outer group ID.
+        var extraMatch = matches.First(m => block.Substring(m.Index, 120).Contains("Extra"));
+        var standaloneMatch = matches.First(m => block.Substring(m.Index, 120).Contains("Standalone"));
+        Assert.Equal(extraMatch.Groups[1].Value, standaloneMatch.Groups[1].Value); // same group
+        Assert.NotEqual(extraMatch.Groups[1].Value, innerXMatch.Groups[1].Value); // different from inner group
+    }
+
+    [Fact]
+    public void TestChoiceGroupNestedChoiceKeepsOuterAndInnerMemberships()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupNestedChoiceKeepsOuterAndInnerMemberships), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "NestedChoiceMemberships");
+
+        var nestedInnerXAttributes = GetChoiceGroupAttributesForProperty(block, "NestedInnerX");
+        var nestedInnerYAttributes = GetChoiceGroupAttributesForProperty(block, "NestedInnerY");
+        var nestedExtraAttributes = GetChoiceGroupAttributesForProperty(block, "NestedExtra");
+        var nestedStandaloneAttributes = GetChoiceGroupAttributesForProperty(block, "NestedStandalone");
+
+        Assert.Equal(2, nestedInnerXAttributes.Count);
+        Assert.Equal(2, nestedInnerYAttributes.Count);
+        Assert.Single(nestedExtraAttributes);
+        Assert.Single(nestedStandaloneAttributes);
+
+        var outerGroupId = nestedExtraAttributes.Single().GroupId;
+        Assert.Contains(nestedInnerXAttributes, a => a.GroupId == outerGroupId && a.ArmId == nestedExtraAttributes.Single().ArmId && a.IsRequired);
+        Assert.Contains(nestedInnerYAttributes, a => a.GroupId == outerGroupId && a.ArmId == nestedExtraAttributes.Single().ArmId && a.IsRequired);
+        Assert.Equal(outerGroupId, nestedStandaloneAttributes.Single().GroupId);
+        Assert.NotEqual(nestedExtraAttributes.Single().ArmId, nestedStandaloneAttributes.Single().ArmId);
+
+        var innerXOnly = nestedInnerXAttributes.Single(a => a.GroupId != outerGroupId);
+        var innerYOnly = nestedInnerYAttributes.Single(a => a.GroupId != outerGroupId);
+        Assert.Equal(innerXOnly.GroupId, innerYOnly.GroupId);
+        Assert.NotEqual(innerXOnly.ArmId, innerYOnly.ArmId);
+        Assert.True(innerXOnly.IsRequired);
+        Assert.True(innerYOnly.IsRequired);
+    }
+
+    [Fact]
+    public void TestChoiceGroupRequiredMetadataReflectsChoiceMinOccurs()
+    {
+        // arrange
+        var generator = CreateChoiceGroupGenerator();
+
+        // act
+        var contents = ConvertXml(nameof(TestChoiceGroupRequiredMetadataReflectsChoiceMinOccurs), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // assert
+        var requiredBlock = ExtractClassBlock(content, "SimpleChoice");
+        var optionalBlock = ExtractClassBlock(content, "OptionalChoice");
+
+        Assert.All(GetChoiceGroupAttributesForProperty(requiredBlock, "Count"), a => Assert.True(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(requiredBlock, "Percentage"), a => Assert.True(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(optionalBlock, "OptionalAlpha"), a => Assert.False(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(optionalBlock, "OptionalBeta"), a => Assert.False(a.IsRequired));
+    }
+
+    [Fact]
+    public void TestChoiceGroupRequiredMetadataReflectsOptionalParent()
+    {
+        // arrange
+        var generator = CreateChoiceGroupGenerator();
+
+        // act
+        var contents = ConvertXml(nameof(TestChoiceGroupRequiredMetadataReflectsOptionalParent), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // assert
+        var optionalParentBlock = ExtractClassBlock(content, "OptionalParentRequiredChoice");
+        Assert.All(GetChoiceGroupAttributesForProperty(optionalParentBlock, "ParentOptionalAlpha"), a => Assert.False(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(optionalParentBlock, "ParentOptionalBeta"), a => Assert.False(a.IsRequired));
+    }
+
+    [Fact]
+    public void TestChoiceGroupRequiredMetadataReflectsEmptiableArms()
+    {
+        // arrange
+        var generator = CreateChoiceGroupGenerator();
+
+        // act
+        var contents = ConvertXml(nameof(TestChoiceGroupRequiredMetadataReflectsEmptiableArms), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // assert
+        var block = ExtractClassBlock(content, "EmptiableChoice");
+        Assert.All(GetChoiceGroupAttributesForProperty(block, "OptionalFirst"), attribute => Assert.False(attribute.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(block, "OptionalSecond"), attribute => Assert.False(attribute.IsRequired));
+    }
+
+    [Fact]
+    public void TestChoiceGroupRequiredMetadataPreservesOptionalityThroughGroupRef()
+    {
+        // arrange
+        var generator = CreateChoiceGroupGenerator();
+
+        // act
+        var contents = ConvertXml(nameof(TestChoiceGroupRequiredMetadataPreservesOptionalityThroughGroupRef), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // assert
+        var block = ExtractClassBlock(content, "OptionalOuterChoiceRequiredGroupRef");
+        Assert.All(GetChoiceGroupAttributesForProperty(block, "GroupNestedAlpha"), a => Assert.False(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(block, "GroupNestedBeta"), a => Assert.False(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(block, "GroupNestedExtra"), a => Assert.False(a.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(block, "GroupRefStandalone"), a => Assert.False(a.IsRequired));
+    }
+
+    [Fact]
+    public void TestChoiceContextForGroupRefPreservesInheritedOptionalityForNestedChoice()
+    {
+        // arrange
+        var optionalOuterMemberships = new[] { new ChoiceGroupMembership(groupId: 1, armId: 0, isRequired: false) };
+
+        // act
+        var groupRefContext = ChoiceContext.ForGroupRef(optionalOuterMemberships, isRequired: true);
+        var nestedChoiceContext = groupRefContext.EnterChoice(groupId: 2, isRequired: true);
+
+        // assert
+        Assert.All(groupRefContext.Memberships, membership => Assert.False(membership.IsRequired));
+        Assert.All(nestedChoiceContext.Memberships, membership => Assert.False(membership.IsRequired));
+    }
+
+    [Theory]
+    [InlineData("<xs:choice maxOccurs='unbounded'><xs:element name='Alpha' type='xs:string'/><xs:element name='Beta' type='xs:string'/></xs:choice>")]
+    [InlineData("<xs:sequence maxOccurs='unbounded'><xs:choice><xs:element name='Alpha' type='xs:string'/><xs:element name='Beta' type='xs:string'/></xs:choice></xs:sequence>")]
+    [InlineData("<xs:sequence><xs:group ref='Alternatives' maxOccurs='unbounded'/></xs:sequence>")]
+    public void TestRepeatedChoicesDoNotMarkAlternativesAsExclusive(string particle)
+    {
+        // arrange
+        var schema = $"<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'><xs:group name='Alternatives'><xs:choice><xs:element name='Alpha' type='xs:string'/><xs:element name='Beta' type='xs:string'/></xs:choice></xs:group><xs:complexType name='Repeated'>{particle}</xs:complexType></xs:schema>";
+        var generator = CreateChoiceGroupGenerator();
+
+        // act
+        var content = string.Join("\n", ConvertXml(nameof(TestRepeatedChoicesDoNotMarkAlternativesAsExclusive), schema, generator));
+        var block = ExtractClassBlock(content, "Repeated");
+
+        // assert
+        Assert.DoesNotContain("XmlChoiceGroupAttribute(", block);
+    }
+
+    [Fact]
+    public void TestRepeatedNestedChoicePreservesOuterExclusivity()
+    {
+        // arrange
+        var schema = "<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'><xs:complexType name='Outer'><xs:choice><xs:choice maxOccurs='unbounded'><xs:element name='Alpha' type='xs:string'/><xs:element name='Beta' type='xs:string'/></xs:choice><xs:element name='Gamma' type='xs:string'/></xs:choice></xs:complexType></xs:schema>";
+        var generator = CreateChoiceGroupGenerator();
+        generator.CollectionSettersMode = CollectionSettersMode.Public;
+
+        // act
+        var content = string.Join("\n", ConvertXml(nameof(TestRepeatedNestedChoicePreservesOuterExclusivity), schema, generator));
+        var block = ExtractClassBlock(content, "Outer");
+        var alpha = Assert.Single(GetChoiceGroupAttributesForProperty(block, "Alpha"));
+        var beta = Assert.Single(GetChoiceGroupAttributesForProperty(block, "Beta"));
+        var gamma = Assert.Single(GetChoiceGroupAttributesForProperty(block, "Gamma"));
+
+        // assert
+        Assert.Equal(alpha, beta);
+        Assert.Equal(alpha.GroupId, gamma.GroupId);
+        Assert.NotEqual(alpha.ArmId, gamma.ArmId);
+    }
+
+    [Fact]
+    public void TestRepeatedElementKeepsChoiceExclusiveWithinEachObject()
+    {
+        // arrange
+        var schema = "<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'><xs:complexType name='Outer'><xs:sequence><xs:element name='Item' type='Item' maxOccurs='unbounded'/></xs:sequence></xs:complexType><xs:complexType name='Item'><xs:choice><xs:element name='Alpha' type='xs:string'/><xs:element name='Beta' type='xs:string'/></xs:choice></xs:complexType></xs:schema>";
+        var generator = CreateChoiceGroupGenerator();
+
+        // act
+        var content = string.Join("\n", ConvertXml(nameof(TestRepeatedElementKeepsChoiceExclusiveWithinEachObject), schema, generator));
+        var block = ExtractClassBlock(content, "Item");
+        var alpha = Assert.Single(GetChoiceGroupAttributesForProperty(block, "Alpha"));
+        var beta = Assert.Single(GetChoiceGroupAttributesForProperty(block, "Beta"));
+
+        // assert
+        Assert.Equal(alpha.GroupId, beta.GroupId);
+        Assert.NotEqual(alpha.ArmId, beta.ArmId);
+    }
+
+    [Fact]
+    public void TestChoiceGroupNotEmittedWhenFlagOff()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        generator.GenerateChoiceGroupAttributes = false;
+        var contents = ConvertXml(nameof(TestChoiceGroupNotEmittedWhenFlagOff), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.DoesNotContain("XmlChoiceGroup", content);
+    }
+
+    [Fact]
+    public void TestChoiceGroupNoAttributeOnNonChoiceElements()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupNoAttributeOnNonChoiceElements), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+        var block = ExtractClassBlock(content, "NoChoice");
+
+        Assert.DoesNotContain("XmlChoiceGroup", block);
+    }
+
+    [Fact]
+    public void TestChoiceGroupAttributeClassGenerated()
+    {
+        var generator = CreateChoiceGroupGenerator();
+        var contents = ConvertXml(nameof(TestChoiceGroupAttributeClassGenerated), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // The XmlChoiceGroupAttribute class should be generated.
+        Assert.Contains("class XmlChoiceGroupAttribute", content);
+        Assert.Contains("AllowMultiple=true", content.Replace(" ", ""));
+        Assert.Contains("public int GroupId", content);
+        Assert.Contains("public int ArmId", content);
+        Assert.Contains("public bool IsRequired", content);
+    }
+
+    private static List<(int GroupId, int ArmId, bool IsRequired)> GetChoiceGroupAttributesForProperty(string classBlock, string propertyName)
+    {
+        var declaration = Regex.Match(classBlock, $@"public[^\r\n]*\s{Regex.Escape(propertyName)}(?=\s|$)");
+        Assert.True(declaration.Success, $"Could not find property {propertyName}.");
+        var propertyIndex = declaration.Index;
+
+        var previousPropertyIndex = classBlock.LastIndexOf("}", propertyIndex, StringComparison.Ordinal);
+        var searchStart = previousPropertyIndex + 1;
+        var attributeBlock = classBlock[searchStart..propertyIndex];
+        var matches = Regex.Matches(attributeBlock, @"XmlChoiceGroupAttribute\((\d+), (\d+), IsRequired=(true|false)\)");
+
+        return matches
+            .Select(m => (
+                GroupId: int.Parse(m.Groups[1].Value),
+                ArmId: int.Parse(m.Groups[2].Value),
+                IsRequired: bool.Parse(m.Groups[3].Value)))
+            .ToList();
+    }
+
+    // -- GenerateStrictFixedValues tests ----------------
+
+    private const string FixedValueXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""Normal"" type=""xs:string"" minOccurs=""0""/>
+            <xs:element name=""DefaultVal"" type=""xs:string"" default=""hello"" minOccurs=""0""/>
+            <xs:element name=""FixedVal"" type=""xs:string"" fixed=""constant"" minOccurs=""0""/>
+            <xs:element name=""FixedInt"" type=""xs:int"" fixed=""42"" minOccurs=""0""/>
+        </xs:sequence>
+        <xs:attribute name=""Version"" type=""xs:string"" fixed=""1.0""/>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestFixedValueWithoutStrictHasSetter()
+    {
+        // Without strict fixed values, properties with fixed values should have setters.
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictFixedValues = false,
+        };
+        var contents = ConvertXml(nameof(TestFixedValueWithoutStrictHasSetter), FixedValueXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // FixedVal should have get and set
+        Assert.Contains("get", content);
+        Assert.Matches(@"FixedVal[^}]*\bset\b", content);
+    }
+
+    [Fact]
+    public void TestFixedValueWithStrictIsReadOnly()
+    {
+        // With strict fixed values, properties with fixed values should be getter-only.
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictFixedValues = true,
+        };
+        var contents = ConvertXml(nameof(TestFixedValueWithStrictIsReadOnly), FixedValueXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // FixedVal and FixedInt should NOT have setters
+        var fixedValBlock = ExtractPropertyBlock(content, "FixedVal");
+        Assert.Contains("get", fixedValBlock);
+        Assert.DoesNotContain("set", fixedValBlock);
+
+        var fixedIntBlock = ExtractPropertyBlock(content, "FixedInt");
+        Assert.Contains("get", fixedIntBlock);
+        Assert.DoesNotContain("set", fixedIntBlock);
+
+        var versionBlock = ExtractPropertyBlock(content, "Version");
+        Assert.Contains("get", versionBlock);
+        Assert.DoesNotContain("set", versionBlock);
+
+        // DefaultVal should still have a setter (it has a default, not a fixed value)
+        var defaultBlock = ExtractPropertyBlock(content, "DefaultVal");
+        Assert.Contains("get", defaultBlock);
+        Assert.Contains("set", defaultBlock);
+
+        // Normal should still have a setter
+        var normalBlock = ExtractPropertyBlock(content, "Normal");
+        Assert.Contains("set", normalBlock);
+    }
+
+    [Fact]
+    public void TestFixedValueWithStrictCompiles()
+    {
+        // The generated code with strict fixed values should compile successfully.
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictFixedValues = true,
+        };
+        var contents = ConvertXml(nameof(TestFixedValueWithStrictCompiles), FixedValueXsd, generator).ToArray();
+        var assembly = Compiler.Compile(nameof(TestFixedValueWithStrictCompiles), contents);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+
+        // FixedVal property should exist and have no setter
+        var fixedValProp = rootType.GetProperty("FixedVal");
+        Assert.NotNull(fixedValProp);
+        Assert.True(fixedValProp.CanRead);
+        Assert.False(fixedValProp.CanWrite);
+
+        // FixedInt property should exist and have no setter
+        var fixedIntProp = rootType.GetProperty("FixedInt");
+        Assert.NotNull(fixedIntProp);
+        Assert.True(fixedIntProp.CanRead);
+        Assert.False(fixedIntProp.CanWrite);
+
+        // Version attribute should exist and have no setter
+        var versionProp = rootType.GetProperty("Version");
+        Assert.NotNull(versionProp);
+        Assert.True(versionProp.CanRead);
+        Assert.False(versionProp.CanWrite);
+
+        // DefaultVal should still have a setter
+        var defaultProp = rootType.GetProperty("DefaultVal");
+        Assert.NotNull(defaultProp);
+        Assert.True(defaultProp.CanRead);
+        Assert.True(defaultProp.CanWrite);
+
+        // Verify the fixed value is correct via a default instance
+        var instance = Activator.CreateInstance(rootType);
+        Assert.Equal("constant", fixedValProp.GetValue(instance));
+        Assert.Equal(42, fixedIntProp.GetValue(instance));
+        Assert.Equal("1.0", versionProp.GetValue(instance));
+    }
+
+    /// <summary>
+    /// Extracts the property block (from the property type through its closing brace)
+    /// for a given property name from generated C# source.
+    /// </summary>
+    private static string ExtractPropertyBlock(string source, string propertyName)
+    {
+        // Match pattern: anything up to and including the property name, then capture
+        // until the next property or end of class. Properties in the CodeDom hack are
+        // CodeMemberFields whose Name includes the accessor block.
+        var idx = source.IndexOf(propertyName);
+        if (idx < 0) return string.Empty;
+
+        // Walk forward to find the balanced braces for the property accessors
+        var start = idx;
+        int braceCount = 0;
+        bool inBraces = false;
+        for (int i = idx; i < source.Length; i++)
+        {
+            if (source[i] == '{') { braceCount++; inBraces = true; }
+            if (source[i] == '}') { braceCount--; }
+            if (inBraces && braceCount == 0)
+                return source.Substring(start, i - start + 1);
+        }
+        return source.Substring(start);
+    }
+
+    // -- GenerateStrictRangeBounds tests ----------------
+
+    private const string SoloRangeBoundsXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:simpleType name=""PercentageType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:minInclusive value=""0""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:simpleType name=""BoundedType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:minInclusive value=""0""/>
+            <xs:maxInclusive value=""100""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:simpleType name=""CappedType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:maxInclusive value=""999""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""Pct"" type=""PercentageType""/>
+            <xs:element name=""Bounded"" type=""BoundedType""/>
+            <xs:element name=""Capped"" type=""CappedType""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestSoloRangeBoundsWithoutStrictNoRange()
+    {
+        // Without strict range bounds, solo minInclusive should NOT produce a [Range] attribute.
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = false,
+        };
+        var contents = ConvertXml(nameof(TestSoloRangeBoundsWithoutStrictNoRange), SoloRangeBoundsXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // BoundedType (both bounds) should still produce a [Range]
+        Assert.Contains(@"RangeAttribute(typeof(decimal)", content);
+
+        // Count total [Range] attributes — should be exactly 1 (only BoundedType)
+        var rangeCount = System.Text.RegularExpressions.Regex.Matches(content, @"RangeAttribute\(typeof").Count;
+        Assert.Equal(1, rangeCount);
+    }
+
+    [Fact]
+    public void TestSoloRangeBoundsWithStrictEmitsRange()
+    {
+        // With strict range bounds, solo minInclusive should produce a [Range] attribute
+        // with the type's maximum as the upper bound.
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = true,
+        };
+        var contents = ConvertXml(nameof(TestSoloRangeBoundsWithStrictEmitsRange), SoloRangeBoundsXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Should have 3 [Range] attributes total (Percentage, Bounded, Capped)
+        var rangeCount = System.Text.RegularExpressions.Regex.Matches(content, @"RangeAttribute\(typeof").Count;
+        Assert.Equal(3, rangeCount);
+
+        // PercentageType (solo minInclusive=0) should include "0" as min bound
+        Assert.Contains(@"""0""", content);
+
+        // CappedType (solo maxInclusive=999) should include "999" as max bound
+        Assert.Contains(@"""999""", content);
+    }
+
+    [Fact]
+    public void TestSoloRangeBoundsWithStrictCompiles()
+    {
+        // The generated code with strict range bounds should compile successfully.
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = true,
+        };
+        var contents = ConvertXml(nameof(TestSoloRangeBoundsWithStrictCompiles), SoloRangeBoundsXsd, generator).ToArray();
+        var assembly = Compiler.Compile(nameof(TestSoloRangeBoundsWithStrictCompiles), contents);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+
+        // Pct property should have a [Range] attribute
+        var pctProp = rootType.GetProperty("Pct");
+        Assert.NotNull(pctProp);
+        var rangeAttr = pctProp.GetCustomAttributes(typeof(System.ComponentModel.DataAnnotations.RangeAttribute), false);
+        Assert.Single(rangeAttr);
+    }
+
+    // -- totalDigits/fractionDigits → Range tests ----------------
+
+    private const string DigitsRangeXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:simpleType name=""ThreeDigitType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:totalDigits value=""3""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:simpleType name=""FiveDigitTwoFractionType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:totalDigits value=""5""/>
+            <xs:fractionDigits value=""2""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:simpleType name=""ExplicitBoundsType"">
+        <xs:restriction base=""xs:decimal"">
+            <xs:totalDigits value=""3""/>
+            <xs:minInclusive value=""0""/>
+            <xs:maxInclusive value=""100""/>
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""ThreeDigit"" type=""ThreeDigitType""/>
+            <xs:element name=""FiveTwo"" type=""FiveDigitTwoFractionType""/>
+            <xs:element name=""Explicit"" type=""ExplicitBoundsType""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestTotalDigitsRangeWithoutStrictNoRange()
+    {
+        // Without strict, totalDigits should NOT produce a [Range].
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = false,
+        };
+        var contents = ConvertXml(nameof(TestTotalDigitsRangeWithoutStrictNoRange), DigitsRangeXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // Only ExplicitBoundsType should produce a [Range] (both bounds present)
+        var rangeCount = System.Text.RegularExpressions.Regex.Matches(content, @"RangeAttribute\(typeof").Count;
+        Assert.Equal(1, rangeCount);
+    }
+
+    [Fact]
+    public void TestTotalDigitsRangeWithStrictEmitsRange()
+    {
+        // With strict, totalDigits=3 should produce [Range(-999, 999)].
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = true,
+        };
+        var contents = ConvertXml(nameof(TestTotalDigitsRangeWithStrictEmitsRange), DigitsRangeXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // ThreeDigitType: totalDigits=3 → [-999, 999]
+        Assert.Contains(@"""-999""", content);
+        Assert.Contains(@"""999""", content);
+
+        // FiveDigitTwoFractionType: totalDigits=5, fractionDigits=2 → [-999.99, 999.99]
+        Assert.Contains(@"""-999.99""", content);
+        Assert.Contains(@"""999.99""", content);
+
+        // Should have 3 [Range] attributes: ThreeDigit, FiveTwo, Explicit
+        var rangeCount = System.Text.RegularExpressions.Regex.Matches(content, @"RangeAttribute\(typeof").Count;
+        Assert.Equal(3, rangeCount);
+    }
+
+    [Fact]
+    public void TestTotalDigitsExplicitBoundsOverrideDigits()
+    {
+        // When explicit bounds are present, totalDigits should NOT produce an additional [Range].
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = true,
+        };
+        var contents = ConvertXml(nameof(TestTotalDigitsExplicitBoundsOverrideDigits), DigitsRangeXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // ExplicitBoundsType should have [Range(0, 100)], NOT [Range(-999, 999)]
+        Assert.Contains(@"""0""", content);
+        Assert.Contains(@"""100""", content);
+
+        // Should have exactly 3 ranges (one per type), not 4
+        var rangeCount = System.Text.RegularExpressions.Regex.Matches(content, @"RangeAttribute\(typeof").Count;
+        Assert.Equal(3, rangeCount);
+    }
+
+    [Fact]
+    public void TestTotalDigitsRangeWithStrictCompiles()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateStrictRangeBounds = true,
+        };
+        var contents = ConvertXml(nameof(TestTotalDigitsRangeWithStrictCompiles), DigitsRangeXsd, generator).ToArray();
+        var assembly = Compiler.Compile(nameof(TestTotalDigitsRangeWithStrictCompiles), contents);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+
+        // ThreeDigit should have a [Range] attribute with bounds -999..999
+        var prop = rootType.GetProperty("ThreeDigit");
+        Assert.NotNull(prop);
+        var rangeAttrs = prop.GetCustomAttributes(typeof(System.ComponentModel.DataAnnotations.RangeAttribute), false);
+        Assert.Single(rangeAttrs);
+        var range = (System.ComponentModel.DataAnnotations.RangeAttribute)rangeAttrs[0];
+        Assert.Equal("-999", range.Minimum?.ToString());
+        Assert.Equal("999", range.Maximum?.ToString());
+    }
+
+    // -- DefaultValueAttribute suppression ----------------
+
+    private const string DefaultValueNullableXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:complexType name=""DefaultValueRoot"">
+        <xs:sequence>
+            <xs:element name=""OptionalStringWithDefault"" type=""xs:string"" minOccurs=""0"" default=""hello""/>
+            <xs:element name=""OptionalIntWithDefault"" type=""xs:int"" minOccurs=""0"" default=""42""/>
+            <xs:element name=""OptionalBoolWithDefault"" type=""xs:boolean"" minOccurs=""0"" default=""true""/>
+            <xs:element name=""RequiredStringWithDefault"" type=""xs:string"" default=""world""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestNullableDirectiveSuppressesDefaultValueAttributeForOptionalString()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            EnableNullableDirective = true,
+            GenerateNullables = true,
+        };
+
+        var contents = ConvertXml(nameof(TestNullableDirectiveSuppressesDefaultValueAttributeForOptionalString), DefaultValueNullableXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.DoesNotContain("DefaultValueAttribute(\"hello\")", content);
+        Assert.Contains("= \"hello\"", content);
+    }
+
+    [Fact]
+    public void TestDefaultValueAttributeStillEmittedWithoutNullableDirective()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            EnableNullableDirective = false,
+            GenerateNullables = true,
+        };
+
+        var contents = ConvertXml(nameof(TestDefaultValueAttributeStillEmittedWithoutNullableDirective), DefaultValueNullableXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.Contains("DefaultValueAttribute(\"hello\")", content);
+    }
+
+    [Fact]
+    public void TestDefaultValueAttributeStillEmittedForValueTypeWithNullableDirective()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            EnableNullableDirective = true,
+            GenerateNullables = true,
+        };
+
+        var contents = ConvertXml(nameof(TestDefaultValueAttributeStillEmittedForValueTypeWithNullableDirective), DefaultValueNullableXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.Contains("DefaultValueAttribute(42)", content);
+    }
+
+    [Fact]
+    public void TestDefaultValueAttributeCanBeSuppressedForExplicitDefaultSerialization()
+    {
+        // arrange
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            EnableNullableDirective = false,
+            GenerateNullables = true,
+            GenerateDefaultValueAttribute = false,
+        };
+        var contents = ConvertXml(nameof(TestDefaultValueAttributeCanBeSuppressedForExplicitDefaultSerialization), DefaultValueNullableXsd, generator).ToArray();
+        var assembly = Compiler.Compile(nameof(TestDefaultValueAttributeCanBeSuppressedForExplicitDefaultSerialization), contents);
+        var rootType = assembly.GetType("Test.DefaultValueRoot");
+        var property = rootType.GetProperty("OptionalBoolWithDefault");
+        var value = Activator.CreateInstance(rootType);
+        property.SetValue(value, true);
+        var serializer = new XmlSerializer(rootType);
+
+        // act
+        using var writer = new StringWriter();
+        serializer.Serialize(writer, value);
+
+        // assert
+        Assert.Empty(property.GetCustomAttributes(typeof(System.ComponentModel.DefaultValueAttribute), false));
+        Assert.Contains("<OptionalBoolWithDefault>true</OptionalBoolWithDefault>", writer.ToString());
+    }
+
+    [Fact]
+    public void TestNullableDirectiveDefaultValueCompilationRoundTrip()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            EnableNullableDirective = true,
+            GenerateNullables = true,
+        };
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestNullableDirectiveDefaultValueCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(DefaultValueNullableXsd) });
+
+        var assembly = Compiler.CompileFiles(nameof(TestNullableDirectiveDefaultValueCompilationRoundTrip), output.Files);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.DefaultValueRoot");
+        Assert.NotNull(rootType);
+
+        Assert.NotNull(rootType.GetProperty("OptionalStringWithDefault"));
+        Assert.NotNull(rootType.GetProperty("OptionalIntWithDefault"));
+        Assert.NotNull(rootType.GetProperty("RequiredStringWithDefault"));
+    }
+
+    private const string MixedContentDefaultValueXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:complexType name=""MixedStringType"" mixed=""true"">
+        <xs:sequence>
+            <xs:element name=""Sub"" type=""xs:string"" minOccurs=""0""/>
+        </xs:sequence>
+        <xs:attribute name=""lang"" type=""xs:language""/>
+    </xs:complexType>
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""Label"" type=""MixedStringType"" default=""hello"" minOccurs=""0""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestMixedContentTypeWithDefaultValueGeneratesCode()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+        };
+
+        var contents = ConvertXml(nameof(TestMixedContentTypeWithDefaultValueGeneratesCode), MixedContentDefaultValueXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.Contains("MixedStringType", content);
+        Assert.Contains("Label", content);
+        Assert.Contains("Text = new string[] { \"hello\" }", content);
+    }
+
+    [Fact]
+    public void TestMixedContentTypeWithDefaultValueCompilationRoundTrip()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+        };
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestMixedContentTypeWithDefaultValueCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(MixedContentDefaultValueXsd) });
+
+        var assembly = Compiler.CompileFiles(nameof(TestMixedContentTypeWithDefaultValueCompilationRoundTrip), output.Files);
+        Assert.NotNull(assembly);
+
+        var mixedType = assembly.GetType("Test.MixedStringType");
+        Assert.NotNull(mixedType);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+        Assert.NotNull(rootType.GetProperty("Label"));
+    }
+
+    private const string SimpleContentRestrictionDefaultValueXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:complexType name=""BaseRefStructure"">
+        <xs:simpleContent>
+            <xs:extension base=""xs:normalizedString"">
+                <xs:attribute name=""ref"" type=""xs:string"" use=""required""/>
+            </xs:extension>
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:complexType name=""DerivedRefStructure"">
+        <xs:simpleContent>
+            <xs:restriction base=""BaseRefStructure"">
+                <xs:attribute name=""ref"" type=""xs:string"" use=""required""/>
+            </xs:restriction>
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""DerivedRef"" type=""DerivedRefStructure"" default=""false"" minOccurs=""0""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestSimpleContentRestrictionWithDefaultValueGeneratesCode()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+        };
+
+        var contents = ConvertXml(nameof(TestSimpleContentRestrictionWithDefaultValueGeneratesCode), SimpleContentRestrictionDefaultValueXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.Contains("DerivedRefStructure", content);
+        Assert.Contains("= \"false\"", content);
+    }
+
+    [Fact]
+    public void TestSimpleContentRestrictionWithDefaultValueCompilationRoundTrip()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+        };
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestSimpleContentRestrictionWithDefaultValueCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(SimpleContentRestrictionDefaultValueXsd) });
+
+        var assembly = Compiler.CompileFiles(nameof(TestSimpleContentRestrictionWithDefaultValueCompilationRoundTrip), output.Files);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+        Assert.NotNull(rootType.GetProperty("DerivedRef"));
+    }
+
+    private const string SimpleContentExtensionDefaultValueXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
+    <xs:complexType name=""MultilingualString"">
+        <xs:simpleContent>
+            <xs:extension base=""xs:normalizedString"">
+                <xs:attribute name=""lang"" type=""xs:language""/>
+            </xs:extension>
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:complexType name=""Root"">
+        <xs:sequence>
+            <xs:element name=""Note"" type=""MultilingualString"" default=""false."" minOccurs=""0""/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>";
+
+    [Fact]
+    public void TestSimpleContentExtensionWithDefaultValueGeneratesCode()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+        };
+
+        var contents = ConvertXml(nameof(TestSimpleContentExtensionWithDefaultValueGeneratesCode), SimpleContentExtensionDefaultValueXsd, generator);
+        var content = string.Join("\n", contents);
+
+        Assert.Contains("MultilingualString", content);
+        Assert.Contains("= \"false.\"", content);
+    }
+
+    [Fact]
+    public void TestSimpleContentExtensionWithDefaultValueCompilationRoundTrip()
+    {
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            GenerateNullables = true,
+        };
+
+        var output = new FileWatcherOutputWriter(Path.Combine("output", nameof(TestSimpleContentExtensionWithDefaultValueCompilationRoundTrip)));
+        generator.OutputWriter = output;
+        output.Configuration = generator.Configuration;
+
+        generator.Generate(new[] { new StringReader(SimpleContentExtensionDefaultValueXsd) });
+
+        var assembly = Compiler.CompileFiles(nameof(TestSimpleContentExtensionWithDefaultValueCompilationRoundTrip), output.Files);
+        Assert.NotNull(assembly);
+
+        var rootType = assembly.GetType("Test.Root");
+        Assert.NotNull(rootType);
+        Assert.NotNull(rootType.GetProperty("Note"));
+    }
+
 }

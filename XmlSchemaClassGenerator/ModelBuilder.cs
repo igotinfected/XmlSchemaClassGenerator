@@ -23,6 +23,7 @@ internal class ModelBuilder
     private readonly Dictionary<XmlQualifiedName, HashSet<Substitute>> SubstitutionGroups = [];
 
     private static readonly XmlQualifiedName AnyType = new("anyType", XmlSchema.Namespace);
+    private int _nextChoiceGroupId;
 
     private static string BuildKey(XmlSchemaAnnotated annotated, XmlQualifiedName name)
         => $"{annotated.GetType()}:{annotated.SourceUri}:{annotated.LineNumber}:{annotated.LinePosition}:{name}";
@@ -1010,7 +1011,14 @@ internal class ModelBuilder
                     if (_configuration.GenerateInterfaces)
                         CreateTypeModel(groupRef.RefName, group.First());
 
-                    var groupItems = GetElements(groupRef.Particle).ToList();
+                    // If this group ref is inside a choice, propagate the choice context
+                    // so elements inside the group inherit the choice group/arm metadata.
+                    // Any choices within the group are independent (not flattened).
+                    var groupContext = item.ChoiceGroupMemberships.Count > 0
+                        ? ChoiceContext.ForGroupRef(item.ChoiceGroupMemberships, item.MinOccurs >= 1.0m)
+                        : new ChoiceContext().EnterNonChoiceCompositor(item.MinOccurs >= 1.0m);
+                    groupContext = groupContext.EnterNonChoiceCompositor(item.MinOccurs >= 1.0m, item.MaxOccurs > 1.0m);
+                    var groupItems = GetElements(groupRef.Particle, groupContext).ToList();
                     var groupProperties = CreatePropertiesForElements(source, owningTypeModel, item, groupItems, order: order, passProperties: false).ToList();
                     if (_configuration.EmitOrder)
                         order += groupProperties.Count;
@@ -1143,11 +1151,53 @@ internal class ModelBuilder
 
     public IEnumerable<Particle> GetElements(XmlSchemaGroupBase groupBase)
     {
-        if (groupBase?.Items != null)
+        var context = new ChoiceContext();
+        return GetElements(groupBase, context);
+    }
+
+    public IEnumerable<Particle> GetElements(XmlSchemaGroupBase groupBase, ChoiceContext context)
+    {
+        if (groupBase?.Items == null)
+            yield break;
+
+        if (groupBase is XmlSchemaChoice && groupBase.MaxOccurs <= 1.0m && !context.IsRepeated)
         {
+            // This is a choice compositor. Only flatten into the parent if
+            // the immediate parent is also a choice (directly nested).
+            if (!context.IsDirectlyInsideChoice)
+            {
+                // New top-level or non-directly-nested choice → own group.
+                context = context.EnterChoice(_nextChoiceGroupId++, context.EffectiveIsRequired && !IsEmptiable(groupBase));
+            }
+            // else: directly nested choice (choice > choice) — reuse the outer
+            // group ID and continue arm numbering from where the parent left off.
+
             foreach (var item in groupBase.Items)
             {
-                foreach (var element in GetElements(item, groupBase))
+                foreach (var element in GetElements(item, groupBase, context))
+                {
+                    element.MaxOccurs = Math.Max(element.MaxOccurs, groupBase.MaxOccurs);
+                    element.MinOccurs = Math.Min(element.MinOccurs, groupBase.MinOccurs);
+                    yield return element;
+                }
+
+                // Each direct child of a choice is a separate arm. For nested choices,
+                // the recursive call already advanced the arm counter for each of its
+                // children. For sequences and single elements, we advance after processing.
+                if (item is not XmlSchemaChoice nestedChoice || nestedChoice.MaxOccurs > 1.0m)
+                    context.AdvanceArm();
+            }
+        }
+        else
+        {
+            // Sequence or All — elements inherit the outer choice context (same group/arm)
+            // but we mark that we're no longer directly inside a choice, so any nested
+            // choices encountered will start their own group rather than flattening.
+            var innerContext = context.EnterNonChoiceCompositor(groupBase.MinOccurs >= 1.0m, groupBase.MaxOccurs > 1.0m);
+
+            foreach (var item in groupBase.Items)
+            {
+                foreach (var element in GetElements(item, groupBase, innerContext))
                 {
                     element.MaxOccurs = Math.Max(element.MaxOccurs, groupBase.MaxOccurs);
                     element.MinOccurs = Math.Min(element.MinOccurs, groupBase.MinOccurs);
@@ -1157,20 +1207,58 @@ internal class ModelBuilder
         }
     }
 
+    private static bool IsEmptiable(XmlSchemaParticle particle)
+    {
+        if (particle.MinOccurs == 0)
+        {
+            return true;
+        }
+
+        return particle switch
+        {
+            XmlSchemaChoice choice => choice.Items
+                .OfType<XmlSchemaParticle>()
+                .Any(IsEmptiable),
+            XmlSchemaSequence sequence => sequence.Items
+                .OfType<XmlSchemaParticle>()
+                .All(IsEmptiable),
+            XmlSchemaAll all => all.Items
+                .OfType<XmlSchemaParticle>()
+                .All(IsEmptiable),
+            XmlSchemaGroupRef groupRef when groupRef.Particle != null => IsEmptiable(groupRef.Particle),
+            _ => false,
+        };
+    }
+
     public IEnumerable<Particle> GetElements(XmlSchemaObject item, XmlSchemaObject parent)
+        => GetElements(item, parent, new ChoiceContext());
+
+    private IEnumerable<Particle> GetElements(XmlSchemaObject item, XmlSchemaObject parent, ChoiceContext context)
     {
         switch (item)
         {
             case null:
                 yield break;
             case XmlSchemaElement element:
-                yield return new Particle(element, parent); break;
+                yield return new Particle(element, parent)
+                {
+                    ChoiceGroupMemberships = [.. context.Memberships],
+                };
+                break;
             case XmlSchemaAny any:
-                yield return new Particle(any, parent); break;
+                yield return new Particle(any, parent)
+                {
+                    ChoiceGroupMemberships = [.. context.Memberships],
+                };
+                break;
             case XmlSchemaGroupRef groupRef:
-                yield return new Particle(groupRef, parent); break;
+                yield return new Particle(groupRef, parent)
+                {
+                    ChoiceGroupMemberships = [.. context.Memberships],
+                };
+                break;
             case XmlSchemaGroupBase itemGroupBase:
-                foreach (var groupBaseElement in GetElements(itemGroupBase))
+                foreach (var groupBaseElement in GetElements(itemGroupBase, context))
                     yield return groupBaseElement;
                 break;
         }
@@ -1190,8 +1278,125 @@ internal class ModelBuilder
     {
         var hierarchy = NamespaceHierarchyItem.Build(Namespaces.Values.GroupBy(x => x.Name).SelectMany(x => x))
             .MarkAmbiguousNamespaceTypes();
-        return hierarchy.Flatten()
-            .Select(nhi => NamespaceModel.Generate(nhi.FullName, nhi.Models, _configuration));
+
+        if (_configuration.GenerateChoiceGroupAttributes)
+            yield return GenerateChoiceGroupAttributeNamespace();
+
+        foreach (var nhi in hierarchy.Flatten())
+            yield return NamespaceModel.Generate(nhi.FullName, nhi.Models, _configuration);
+    }
+
+    private CodeNamespace GenerateChoiceGroupAttributeNamespace()
+    {
+        var ns = new CodeNamespace(GetChoiceGroupAttributeNamespace(_configuration));
+        ns.Imports.Add(new CodeNamespaceImport("System"));
+
+        // [AttributeUsage(AttributeTargets.Property, AllowMultiple = true)]
+        // public sealed class XmlChoiceGroupAttribute : Attribute
+        // {
+        //     public int GroupId { get; }
+        //     public int ArmId { get; }
+        //     public bool IsRequired { get; set; }
+        //     public XmlChoiceGroupAttribute(int groupId, int armId)
+        //     {
+        //         GroupId = groupId;
+        //         ArmId = armId;
+        //     }
+        // }
+
+        var attrClass = new CodeTypeDeclaration("XmlChoiceGroupAttribute")
+        {
+            IsClass = true,
+            TypeAttributes = System.Reflection.TypeAttributes.Public | System.Reflection.TypeAttributes.Sealed,
+        };
+        attrClass.BaseTypes.Add(new CodeTypeReference("System.Attribute"));
+
+        // [AttributeUsage(AttributeTargets.Property, AllowMultiple = true)]
+        attrClass.CustomAttributes.Add(new CodeAttributeDeclaration(
+            new CodeTypeReference("System.AttributeUsageAttribute"),
+            new CodeAttributeArgument(new CodeFieldReferenceExpression(
+                new CodeTypeReferenceExpression("System.AttributeTargets"), "Property")),
+            new CodeAttributeArgument("AllowMultiple", new CodePrimitiveExpression(true))));
+
+        // Properties: GroupId, ArmId
+        var groupIdField = new CodeMemberField(typeof(int), "_groupId");
+        groupIdField.Attributes = MemberAttributes.Private;
+        attrClass.Members.Add(groupIdField);
+
+        var armIdField = new CodeMemberField(typeof(int), "_armId");
+        armIdField.Attributes = MemberAttributes.Private;
+        attrClass.Members.Add(armIdField);
+
+        var groupIdProp = new CodeMemberProperty
+        {
+            Name = "GroupId",
+            Type = new CodeTypeReference(typeof(int)),
+            Attributes = MemberAttributes.Public | MemberAttributes.Final,
+            HasGet = true,
+            HasSet = false,
+        };
+        groupIdProp.GetStatements.Add(new CodeMethodReturnStatement(
+            new CodeFieldReferenceExpression(new CodeThisReferenceExpression(), "_groupId")));
+        attrClass.Members.Add(groupIdProp);
+
+        var armIdProp = new CodeMemberProperty
+        {
+            Name = "ArmId",
+            Type = new CodeTypeReference(typeof(int)),
+            Attributes = MemberAttributes.Public | MemberAttributes.Final,
+            HasGet = true,
+            HasSet = false,
+        };
+        armIdProp.GetStatements.Add(new CodeMethodReturnStatement(
+            new CodeFieldReferenceExpression(new CodeThisReferenceExpression(), "_armId")));
+        attrClass.Members.Add(armIdProp);
+
+        var isRequiredField = new CodeMemberField(typeof(bool), "_isRequired");
+        isRequiredField.Attributes = MemberAttributes.Private;
+        attrClass.Members.Add(isRequiredField);
+
+        var isRequiredProp = new CodeMemberProperty
+        {
+            Name = "IsRequired",
+            Type = new CodeTypeReference(typeof(bool)),
+            Attributes = MemberAttributes.Public | MemberAttributes.Final,
+            HasGet = true,
+            HasSet = true,
+        };
+        isRequiredProp.GetStatements.Add(new CodeMethodReturnStatement(
+            new CodeFieldReferenceExpression(new CodeThisReferenceExpression(), "_isRequired")));
+        isRequiredProp.SetStatements.Add(new CodeAssignStatement(
+            new CodeFieldReferenceExpression(new CodeThisReferenceExpression(), "_isRequired"),
+            new CodePropertySetValueReferenceExpression()));
+        attrClass.Members.Add(isRequiredProp);
+
+        // Constructor(int groupId, int armId)
+        var ctor = new CodeConstructor
+        {
+            Attributes = MemberAttributes.Public,
+        };
+        ctor.Parameters.Add(new CodeParameterDeclarationExpression(typeof(int), "groupId"));
+        ctor.Parameters.Add(new CodeParameterDeclarationExpression(typeof(int), "armId"));
+        ctor.Statements.Add(new CodeAssignStatement(
+            new CodeFieldReferenceExpression(new CodeThisReferenceExpression(), "_groupId"),
+            new CodeArgumentReferenceExpression("groupId")));
+        ctor.Statements.Add(new CodeAssignStatement(
+            new CodeFieldReferenceExpression(new CodeThisReferenceExpression(), "_armId"),
+            new CodeArgumentReferenceExpression("armId")));
+        attrClass.Members.Add(ctor);
+
+        ns.Types.Add(attrClass);
+        return ns;
+    }
+
+    internal static string GetChoiceGroupAttributeNamespace(GeneratorConfiguration configuration)
+    {
+        if (!string.IsNullOrEmpty(configuration.ChoiceGroupAttributeNamespace))
+            return configuration.ChoiceGroupAttributeNamespace;
+
+        return string.IsNullOrEmpty(configuration.NamespacePrefix)
+            ? "XmlChoiceGroupAttributes"
+            : configuration.NamespacePrefix;
     }
 
     private string BuildNamespace(Uri source, string xmlNamespace)

@@ -1,9 +1,10 @@
-﻿using System;
+using System;
 using System.CodeDom;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Xml;
 using System.Xml.Schema;
 using System.Xml.Serialization;
@@ -26,6 +27,7 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
     // private
     public string OriginalPropertyName { get; private set; }
+    public string RenamedFrom { get; set; }
     public string DefaultValue { get; private set; }
     public string FixedValue { get; private set; }
     public XmlSchemaForm Form { get; private set; }
@@ -44,6 +46,45 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
     public bool IsAny { get; set; }
     public int? Order { get; set; }
     public bool IsKey { get; set; }
+
+    /// <summary>
+    /// Identifies which choice group this property belongs to, if any.
+    /// Null means the property is not part of a choice.
+    /// </summary>
+    public List<ChoiceGroupMembership> ChoiceGroupMemberships { get; } = [];
+
+    public int? ChoiceGroupId
+    {
+        get => ChoiceGroupMemberships.LastOrDefault()?.GroupId;
+        set
+        {
+            ChoiceGroupMemberships.Clear();
+            if (value.HasValue)
+            {
+                ChoiceGroupMemberships.Add(new ChoiceGroupMembership(value.Value, ChoiceArmId ?? 0, true));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Identifies which arm within a choice group this property belongs to.
+    /// Elements in the same arm (e.g. from a sequence within a choice) share the same arm ID.
+    /// </summary>
+    public int? ChoiceArmId
+    {
+        get => ChoiceGroupMemberships.LastOrDefault()?.ArmId;
+        set
+        {
+            if (ChoiceGroupMemberships.Count == 0)
+            {
+                return;
+            }
+
+            var lastIndex = ChoiceGroupMemberships.Count - 1;
+            var membership = ChoiceGroupMemberships[lastIndex];
+            ChoiceGroupMemberships[lastIndex] = new ChoiceGroupMembership(membership.GroupId, value ?? 0, membership.IsRequired);
+        }
+    }
 
     public void SetFromNode(string originalName, bool useFixedIfNoDefault, IXmlSchemaNode xs)
     {
@@ -66,6 +107,9 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
         IsRequired = isRequired;
         IsCollection = item.MaxOccurs > 1.0m || particle.MaxOccurs > 1.0m; // http://msdn.microsoft.com/en-us/library/vstudio/d3hx2s7e(v=vs.100).aspx
+
+        ChoiceGroupMemberships.Clear();
+        ChoiceGroupMemberships.AddRange(item.ChoiceGroupMemberships);
     }
 
     public void SetSchemaNameAndNamespace(TypeModel owningTypeModel, IXmlSchemaNode xs)
@@ -76,7 +120,42 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
                         : xs.QualifiedName.Namespace;
     }
 
-    internal static string GetAccessors(CodeMemberField backingField = null, bool withDataBinding = false, PropertyValueTypeCode typeCode = PropertyValueTypeCode.Other, string setter = "set")
+    /// <summary>
+    /// Cached reflection accessor for <see cref="CodeTypeReference"/>'s private <c>_baseType</c> field.
+    /// Used by <see cref="CreateLiteralTypeRef"/> to bypass CodeDom's type name parsing.
+    /// </summary>
+    private static readonly FieldInfo BaseTypeField =
+        typeof(CodeTypeReference).GetField("_baseType", BindingFlags.NonPublic | BindingFlags.Instance)
+        ?? throw new InvalidOperationException("Could not find CodeTypeReference._baseType field via reflection.");
+
+    /// <summary>
+    /// Creates a <see cref="CodeTypeReference"/> that renders as the given literal string,
+    /// bypassing CodeDom's type name parsing. This is necessary for types that include
+    /// syntax CodeDom cannot represent (e.g. <c>List&lt;string&gt;?</c>, <c>byte[]?</c>,
+    /// or <c>required string</c>), because CodeDom's constructor splits on <c>&lt;</c>,
+    /// <c>&gt;</c>, <c>[</c>, and <c>]</c>, losing any trailing <c>?</c> suffix or
+    /// unrecognised prefix.
+    /// </summary>
+    internal static CodeTypeReference CreateLiteralTypeRef(string literalTypeName)
+    {
+        var typeRef = new CodeTypeReference();
+        BaseTypeField.SetValue(typeRef, literalTypeName);
+        return typeRef;
+    }
+
+    /// <summary>
+    /// Renders a <see cref="CodeTypeReference"/> to its C# source representation
+    /// (resolving aliases and generic arguments), then wraps the result with an
+    /// optional <paramref name="prefix"/> and/or <paramref name="suffix"/> into
+    /// a literal <see cref="CodeTypeReference"/> that CodeDom outputs verbatim.
+    /// </summary>
+    internal static CodeTypeReference WrapTypeRef(CodeTypeReference source, string prefix = "", string suffix = "")
+    {
+        var rendered = TypeModel.GetCSharpTypeOutput(source);
+        return CreateLiteralTypeRef(prefix + rendered + suffix);
+    }
+
+    internal static string GetAccessors(CodeMemberField backingField = null, bool withDataBinding = false, PropertyValueTypeCode typeCode = PropertyValueTypeCode.Other, string setter = "set", string assignedField = null)
     {
         return backingField == null ? " { get; set; }" : CodeUtilities.NormalizeNewlines($@"
         {{
@@ -85,7 +164,7 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
                 return {backingField.Name};
             }}
             {setter}
-            {{{(typeCode, withDataBinding) switch
+            {{{(assignedField == null ? "" : $"\n                {assignedField} = true;")}{(typeCode, withDataBinding) switch
         {
             (PropertyValueTypeCode.ValueType, true) => $@"
                 if ({checkEquality()}){assignAndNotify()}",
@@ -126,13 +205,31 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
     private TypeModel PropertyType => !IsArray ? Type : TypeClassModel.Properties[0].Type;
 
+    private bool TrackDefaultAssignment => Configuration.UseShouldSerializeForDefaultValues
+        && DefaultValue != null && FixedValue == null && !IsRequired && !IsEnumerable
+        && (PropertyType is EnumModel || PropertyType is SimpleModel { ValueType: var valueType }
+            && (valueType.IsValueType || valueType == typeof(string)));
+
     private bool IsNullable => DefaultValue == null && !IsRequired;
 
     private bool IsValueType => PropertyType is EnumModel || (PropertyType is SimpleModel model && model.ValueType.IsValueType);
 
     private bool IsNullableValueType => IsNullable && !IsEnumerable && IsValueType;
 
-    private bool IsNullableReferenceType => IsNullable && (!IsEnumerable || !IsPrivateSetter) && (PropertyType is ClassModel || (PropertyType is SimpleModel model && !model.ValueType.IsValueType));
+    // A reference type is nullable when:
+    // - the property is optional (IsNullable covers no-default + not-required), OR
+    // - the property has a default value but is still optional (!IsRequired),
+    //   because a reference type with a default can still legitimately be null (element absent from XML).
+    //   IsNullable excludes defaults because value types use the Specified pattern instead of Nullable<T>,
+    //   but that reasoning doesn't apply to reference types which are inherently nullable.
+    //
+    // This applies to both the EnableNullableDirective ('?' syntax) and
+    // EnableNullableReferenceAttributes ([AllowNull]/[MaybeNull]) paths —
+    // both consumers guard on their respective configuration flags.
+    private bool IsNullableReferenceType =>
+        (IsNullable || (DefaultValue != null && !IsRequired))
+        && (!IsEnumerable || !IsPrivateSetter)
+        && (PropertyType is ClassModel || (PropertyType is SimpleModel model && !model.ValueType.IsValueType));
 
     private bool IsNillableValueType => IsNillable && !IsEnumerable && IsValueType;
 
@@ -156,6 +253,13 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
         }
 
         member.Comments.AddRange(GetComments(docs).ToArray());
+
+        if (RenamedFrom != null)
+        {
+            member.Comments.Add(new CodeCommentStatement("<remarks>", true));
+            member.Comments.Add(new CodeCommentStatement($"This property was renamed from <c>{RenamedFrom}</c> to <c>{Name}</c> to avoid a collision with an existing member.", true));
+            member.Comments.Add(new CodeCommentStatement("</remarks>", true));
+        }
     }
 
     private CodeAttributeDeclaration CreateDefaultValueAttribute(CodeTypeReference typeReference, CodeExpression defaultValueExpression)
@@ -178,22 +282,34 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
         var isPrivateSetter = IsPrivateSetter;
         var typeReference = TypeReference;
 
-        if ((isNullableValueType || IsNillableValueType) && Configuration.GenerateNullables)
+        if (FixedValue != null && Configuration.GenerateStrictFixedValues
+            ? IsNillableValueType
+            : (isNullableValueType || IsNillableValueType) && Configuration.GenerateNullables)
             typeReference = NullableTypeRef(typeReference);
+
+        // Apply nullable reference type syntax on interface members to match
+        // the implementing class (which uses '?' when EnableNullableDirective is on).
+        // WrapTypeRef renders via CSharpCodeProvider then creates a literal CodeTypeReference,
+        // so it works for all types including generics (List<string>?) and arrays (byte[]?).
+        if (IsNullableReferenceType && Configuration.EnableNullableDirective)
+        {
+            typeReference = WrapTypeRef(typeReference, suffix: "?");
+        }
 
         member = new CodeMemberProperty
         {
             Name = Name,
             Type = typeReference,
             HasGet = true,
-            HasSet = !isPrivateSetter
+            HasSet = !isPrivateSetter && !(FixedValue != null && Configuration.GenerateStrictFixedValues)
         };
 
-        if (DefaultValue != null && !IsRequired)
+        if (DefaultValue != null && !IsRequired && Configuration.GenerateDefaultValueAttribute && !TrackDefaultAssignment)
         {
             var defaultValueExpression = propertyType.GetDefaultValueFor(DefaultValue, IsAttribute);
 
-            if ((defaultValueExpression is CodePrimitiveExpression or CodeFieldReferenceExpression) && !CodeUtilities.IsXmlLangOrSpace(XmlSchemaName))
+            if ((defaultValueExpression is CodePrimitiveExpression or CodeFieldReferenceExpression) && !CodeUtilities.IsXmlLangOrSpace(XmlSchemaName)
+                && !(IsNullableReferenceType && Configuration.EnableNullableDirective))
             {
                 var defaultValueAttribute = CreateDefaultValueAttribute(typeReference, defaultValueExpression);
                 member.CustomAttributes.Add(defaultValueAttribute);
@@ -220,8 +336,13 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
         CodeAttributeDeclaration ignoreAttribute = new(TypeRef<XmlIgnoreAttribute>());
         CodeAttributeDeclaration notMappedAttribute = new(CodeUtilities.CreateTypeReference(Attributes.NotMapped, Configuration));
 
+        // When strict fixed values is on and this property has a fixed value,
+        // we always need a backing field to hold the initialized value, even if
+        // DefaultValue is null (which is the case for optional fixed elements).
+        var needsStrictFixed = FixedValue != null && Configuration.GenerateStrictFixedValues;
+
         CodeMemberField backingField = null;
-        if (withDataBinding || DefaultValue != null || isEnumerable)
+        if (withDataBinding || DefaultValue != null || isEnumerable || needsStrictFixed)
         {
             backingField = IsNillableValueType
                 ? new CodeMemberField(NullableTypeRef(typeReference), OwningType.GetUniqueFieldName(this))
@@ -230,7 +351,22 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
             typeDeclaration.Members.Add(backingField);
         }
 
-        if (DefaultValue == null || isEnumerable)
+        if (needsStrictFixed)
+        {
+            // the serializer uses a writable proxy while callers keep a read-only property
+            var fixedExpression = propertyType.GetDefaultValueFor(FixedValue, IsAttribute);
+            backingField.InitExpression = fixedExpression;
+
+            member.Type = IsNillableValueType ? NullableTypeRef(typeReference) : typeReference;
+            member.Name += CodeUtilities.NormalizeNewlines($@"
+        {{
+            get
+            {{
+                return {backingField.Name};
+            }}
+        }}");
+        }
+        else if (DefaultValue == null || isEnumerable)
         {
             if (isNullableValueType && Configuration.GenerateNullables && !(Configuration.UseShouldSerializePattern && !IsAttribute))
                 member.Name += Value;
@@ -273,10 +409,45 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
             member.Type = IsNillableValueType ? NullableTypeRef(typeReference) : typeReference;
 
-            member.Name += GetAccessors(backingField, withDataBinding, propertyType.GetPropertyValueTypeCode());
+            string assignedField = null;
+            if (TrackDefaultAssignment)
+            {
+                assignedField = backingField.Name + "Assigned";
+                while (typeDeclaration.Members.Cast<CodeTypeMember>().Any(existing => existing.Name == assignedField)
+                    || ((ClassModel)OwningType).Properties.Any(property => property.Name == assignedField || OwningType.GetUniqueFieldName(property) == assignedField))
+                {
+                    assignedField += "_";
+                }
 
-            if (!IsRequired && (defaultValueExpression is CodePrimitiveExpression or CodeFieldReferenceExpression) && !CodeUtilities.IsXmlLangOrSpace(XmlSchemaName))
+                typeDeclaration.Members.Add(new CodeMemberField(typeof(bool), assignedField)
+                {
+                    Attributes = MemberAttributes.Private,
+                });
+                typeDeclaration.Members.Add(new CodeMemberMethod
+                {
+                    Attributes = MemberAttributes.Public | MemberAttributes.Final,
+                    Name = "ShouldSerialize" + Name,
+                    ReturnType = new CodeTypeReference(typeof(bool)),
+                    Statements = { new CodeMethodReturnStatement(new CodeFieldReferenceExpression(new CodeThisReferenceExpression(), assignedField)) },
+                });
+            }
+
+            member.Name += GetAccessors(backingField, withDataBinding, propertyType.GetPropertyValueTypeCode(), assignedField: assignedField);
+
+            if (!IsRequired && Configuration.GenerateDefaultValueAttribute && !TrackDefaultAssignment && (defaultValueExpression is CodePrimitiveExpression or CodeFieldReferenceExpression) && !CodeUtilities.IsXmlLangOrSpace(XmlSchemaName)
+                && !(IsNullableReferenceType && Configuration.EnableNullableDirective))
                 member.CustomAttributes.Add(CreateDefaultValueAttribute(typeReference, defaultValueExpression));
+        }
+
+        // Emit the C# 11 'required' modifier for required properties.
+        // CodeDom renders a CodeMemberField as: <access> <type> <name>;
+        // By prepending "required " to the type name we get: public required <type> <name> { get; set; }
+        // Skip for strict fixed values — read-only properties cannot be 'required'.
+        if (IsRequired && !IsEnumerable && Configuration.GenerateRequiredModifier && !needsStrictFixed)
+        {
+            // Clone the type reference so we don't also modify the backing field's type
+            // (member.Type may be the same object as backingField.Type when both point to typeReference).
+            member.Type = WrapTypeRef(member.Type, prefix: "required ");
         }
 
         member.Attributes = MemberAttributes.Public;
@@ -284,7 +455,10 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
         AddDocs(member);
 
-        if (IsRequired && Configuration.DataAnnotationMode != DataAnnotationMode.None)
+        // Emit [Required] for DataAnnotations validation unless the C# 11 'required'
+        // modifier is active, which provides strictly stronger compile-time enforcement.
+        // Skip for strict fixed values — the value is immutable, so requiring it is meaningless.
+        if (IsRequired && Configuration.DataAnnotationMode != DataAnnotationMode.None && !Configuration.GenerateRequiredModifier && !needsStrictFixed)
         {
             var requiredAttribute = new CodeAttributeDeclaration(CodeUtilities.CreateTypeReference(Attributes.Required, Configuration));
             var noEmptyStrings = propertyType is SimpleModel simpleModel
@@ -299,7 +473,7 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
             // From .NET 3.5 XmlSerializer doesn't serialize objects with [Obsolete] >(
         }
 
-        if (isNullableValueType)
+        if (isNullableValueType && !needsStrictFixed)
         {
             bool generateNullablesProperty = Configuration.GenerateNullables;
             bool generateSpecifiedProperty = true;
@@ -462,14 +636,291 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
             }
         }
 
-        if (IsNullableReferenceType && Configuration.EnableNullableReferenceAttributes)
+        if (IsNullableReferenceType)
         {
-            member.CustomAttributes.Add(new CodeAttributeDeclaration(CodeUtilities.CreateTypeReference(Attributes.AllowNull, Configuration)));
-            member.CustomAttributes.Add(new CodeAttributeDeclaration(CodeUtilities.CreateTypeReference(Attributes.MaybeNull, Configuration)));
+            if (Configuration.EnableNullableDirective)
+            {
+                // Use native nullable reference type syntax: append ? to the type name.
+                // WrapTypeRef renders via CSharpCodeProvider then creates a literal CodeTypeReference,
+                // so it works for ALL types including generics (List<string>?) and arrays (byte[]?).
+                member.Type = WrapTypeRef(member.Type, suffix: "?");
+
+                // Also make the backing field nullable so the setter assignment is null-safe.
+                if (backingField != null)
+                {
+                    backingField.Type = WrapTypeRef(backingField.Type, suffix: "?");
+                }
+            }
+            else if (Configuration.EnableNullableReferenceAttributes)
+            {
+                member.CustomAttributes.Add(new CodeAttributeDeclaration(CodeUtilities.CreateTypeReference(Attributes.AllowNull, Configuration)));
+                member.CustomAttributes.Add(new CodeAttributeDeclaration(CodeUtilities.CreateTypeReference(Attributes.MaybeNull, Configuration)));
+            }
         }
 
         var attributes = GetAttributes(isArray).ToArray();
-        member.CustomAttributes.AddRange(attributes);
+
+        // For xsd:list element properties with EnumCollection, XmlSerializer cannot natively
+        // serialize a collection as a single element with space-separated values. It would emit
+        // one <Element> per item instead. Fix: make the typed collection [XmlIgnore] and add a
+        // string proxy property with the [XmlElement] attribute that converts between the typed
+        // collection and the space-separated string using the [XmlEnum] attribute names.
+        var enumListItemType = IsList && !IsAttribute && Configuration.EnumCollection && propertyType is SimpleModel listSimpleModel
+            ? listSimpleModel.EnumListItemType : null;
+
+        if (needsStrictFixed)
+        {
+            member.CustomAttributes.Add(ignoreAttribute);
+            var classModel = (ClassModel)OwningType;
+            var reservedNames = new HashSet<string>(classModel.AllBaseClasses.Concat(new[] { classModel })
+                .SelectMany(model => model.Properties).Select(property => property.Name));
+            reservedNames.UnionWith(typeDeclaration.Members.Cast<CodeTypeMember>().Select(existing => existing.Name.Split(' ', '\r', '\n')[0]));
+            var proxyName = Name + "Xml";
+            while (reservedNames.Contains(proxyName) || reservedNames.Contains("ShouldSerialize" + proxyName))
+            {
+                proxyName += "_";
+            }
+            reservedNames.Add(proxyName);
+
+            string includedField = null;
+            if (!IsRequired)
+            {
+                includedField = backingField.Name + "Included";
+                while (reservedNames.Contains(includedField)
+                    || classModel.Properties.Any(property => OwningType.GetUniqueFieldName(property) == includedField))
+                {
+                    includedField += "_";
+                }
+                reservedNames.Add(includedField);
+                typeDeclaration.Members.Add(new CodeMemberField(typeof(bool), includedField) { Attributes = MemberAttributes.Private });
+                var includeName = "Include" + Name;
+                while (reservedNames.Contains(includeName))
+                {
+                    includeName += "_";
+                }
+                typeDeclaration.Members.Add(new CodeMemberMethod
+                {
+                    Attributes = MemberAttributes.Public | MemberAttributes.Final,
+                    Name = includeName,
+                    Statements = { new CodeAssignStatement(new CodeFieldReferenceExpression(new CodeThisReferenceExpression(), includedField), new CodePrimitiveExpression(true)) },
+                });
+                typeDeclaration.Members.Add(new CodeMemberMethod
+                {
+                    Attributes = MemberAttributes.Public | MemberAttributes.Final,
+                    Name = "ShouldSerialize" + proxyName,
+                    ReturnType = TypeRef<bool>(),
+                    Statements = { new CodeMethodReturnStatement(new CodeFieldReferenceExpression(new CodeThisReferenceExpression(), includedField)) },
+                });
+            }
+
+            var fixedEquals = typeReference.ArrayRank > 0
+                ? $"value != null && System.Linq.Enumerable.SequenceEqual(value, {backingField.Name})"
+                : $"object.Equals(value, {backingField.Name})";
+            var proxyAccessors = CodeUtilities.NormalizeNewlines($@"
+        {{
+            get
+            {{
+                return {backingField.Name};
+            }}
+            set
+            {{
+                if (!({fixedEquals}))
+                {{
+                    throw new System.ArgumentOutOfRangeException(nameof(value), value, ""The value must match the schema's fixed value."");
+                }}{(includedField == null ? "" : $"\n                {includedField} = true;")}
+            }}
+        }}");
+            var proxyMember = new CodeMemberField(member.Type, proxyName + proxyAccessors)
+            {
+                Attributes = MemberAttributes.Public,
+            };
+            proxyMember.CustomAttributes.AddRange(attributes);
+            var editorBrowsableAttr = AttributeDecl<EditorBrowsableAttribute>();
+            editorBrowsableAttr.Arguments.Add(new(new CodeFieldReferenceExpression(TypeRefExpr<EditorBrowsableState>(), nameof(EditorBrowsableState.Never))));
+            proxyMember.CustomAttributes.Add(editorBrowsableAttr);
+            typeDeclaration.Members.Add(proxyMember);
+            Configuration.MemberVisitor(proxyMember, this);
+        }
+        else if (enumListItemType != null)
+        {
+            // The typed collection member becomes [XmlIgnore] — it's the programmatic API.
+            member.CustomAttributes.Add(ignoreAttribute);
+
+            // The proxy setter always assigns null to the backing field when the input is
+            // null/empty. Under #nullable enable both the backing field and the public
+            // collection property must be nullable, even when IsNullableReferenceType is
+            // false (e.g. required enum-list properties), because the getter returns the
+            // backing field directly and the setter nulls it out.
+            if (Configuration.EnableNullableDirective && backingField != null
+                && !backingField.Type.BaseType.TrimEnd().EndsWith("?"))
+            {
+                backingField.Type = WrapTypeRef(backingField.Type, suffix: "?");
+                member.Type = WrapTypeRef(member.Type, suffix: "?");
+            }
+
+            // Get the enum type name and values for the proxy accessor code.
+            var enumTypeRef = enumListItemType.GetReferenceFor(OwningType.Namespace);
+            var enumTypeName = TypeModel.GetCSharpTypeOutput(enumTypeRef);
+            var enumValues = ((EnumModel)enumListItemType).Values;
+
+            var backingFieldName = backingField != null ? backingField.Name : $"this.{Name}";
+            var collectionType = Configuration.CollectionImplementationType ?? Configuration.CollectionType;
+            var isArrayCollection = collectionType == typeof(Array);
+            var countMember = isArrayCollection ? "Length" : "Count";
+
+            // Build switch arms: enum member → XML name, and XML name → enum member.
+            var toStringArms = string.Join("\n                    ",
+                enumValues.Select(v => $@"{enumTypeName}.{v.Name} => ""{v.Value}"","));
+            var fromStringArms = string.Join("\n                    ",
+                enumValues.Select(v => $@"""{v.Value}"" => {enumTypeName}.{v.Name},"));
+
+            // Getter: convert each enum value to its XML name via a switch expression
+            // and join them with spaces.
+            var getterCode = $@"
+                if ({backingFieldName} == null || {backingFieldName}.{countMember} == 0) return null;
+                return string.Join("" "", System.Linq.Enumerable.Select({backingFieldName}, item => item switch
+                {{
+                    {toStringArms}
+                    _ => item.ToString()
+                }}));";
+
+            // Setter: split space-separated XML names and convert each to an enum value
+            // via a switch expression, then assign directly to the backing field.
+            var collectionImplName = SimpleModel.GetCollectionImplementationName(enumTypeName, Configuration);
+
+            // Build the assignment that materializes the parsed enumerable into the
+            // configured collection type. List<T> and HashSet<T> accept IEnumerable<T>
+            // directly, but Collection<T> requires IList<T>, so we materialize through
+            // a List<T> intermediate for that case.
+            var collectionImplType = collectionType.IsGenericType ? collectionType.GetGenericTypeDefinition() : collectionType;
+            var listIntermediate = $"new System.Collections.Generic.List<{enumTypeName}>(parsed)";
+
+            string setterAssignment;
+            if (isArrayCollection)
+                setterAssignment = $"{backingFieldName} = System.Linq.Enumerable.ToArray(parsed);";
+            else if (collectionImplType == typeof(List<>))
+                setterAssignment = $"{backingFieldName} = {listIntermediate};";
+            else
+                setterAssignment = $"{backingFieldName} = new {collectionImplName}({listIntermediate});";
+
+            var setterCode = $@"
+                if (string.IsNullOrEmpty(value)) {{ {backingFieldName} = null; return; }}
+                var parsed = System.Linq.Enumerable.Select(value.Split(' '), part => part switch
+                {{
+                    {fromStringArms}
+                    _ => throw new System.ArgumentException($""Unknown value '{{part}}' for {enumTypeName}"")
+                }});
+                {setterAssignment}";
+
+            var proxyAccessors = CodeUtilities.NormalizeNewlines($@"
+        {{
+            get
+            {{{getterCode}
+            }}
+            set
+            {{{setterCode}
+            }}
+        }}");
+
+            // Use string? when #nullable enable is active since the getter returns null for empty collections.
+            CodeTypeReference proxyTypeRef = Configuration.EnableNullableDirective
+                ? CreateLiteralTypeRef("string?")
+                : new CodeTypeReference(typeof(string));
+
+            var proxyMember = new CodeMemberField(proxyTypeRef, Name + "Xml" + proxyAccessors)
+            {
+                Attributes = MemberAttributes.Public
+            };
+            proxyMember.CustomAttributes.AddRange(attributes);
+
+            // Hide the proxy from IntelliSense
+            var editorBrowsableAttr = AttributeDecl<EditorBrowsableAttribute>();
+            editorBrowsableAttr.Arguments.Add(new(new CodeFieldReferenceExpression(TypeRefExpr<EditorBrowsableState>(), nameof(EditorBrowsableState.Never))));
+            proxyMember.CustomAttributes.Add(editorBrowsableAttr);
+
+            typeDeclaration.Members.Add(proxyMember);
+            Configuration.MemberVisitor(proxyMember, this);
+        }
+        else if (IsList && !IsAttribute && !IsCollection && propertyType is SimpleModel stringListModel
+            && stringListModel.XmlSchemaType.Datatype.GetEffectiveType(Configuration, stringListModel.Restrictions, stringListModel.XmlSchemaType) == typeof(string))
+        {
+            member.CustomAttributes.Add(ignoreAttribute);
+            var fieldName = backingField.Name;
+            var collectionType = Configuration.CollectionImplementationType ?? Configuration.CollectionType;
+            var countMember = collectionType == typeof(Array) ? "Length" : "Count";
+            var collectionName = SimpleModel.GetCollectionImplementationName(typeof(string).FullName, Configuration);
+            var collectionDefinition = collectionType.IsGenericType ? collectionType.GetGenericTypeDefinition() : collectionType;
+            var parsedValue = collectionType == typeof(Array)
+                ? "items"
+                : collectionDefinition == typeof(List<>)
+                    ? "new System.Collections.Generic.List<string>(items)"
+                    : $"new {collectionName}(new System.Collections.Generic.List<string>(items))";
+            var emptyValue = collectionType == typeof(Array)
+                ? "new string[0]"
+                : $"new {collectionName}()";
+            var classModel = (ClassModel)OwningType;
+            var propertyNames = classModel.AllBaseClasses.Concat(new[] { classModel })
+                .SelectMany(model => model.Properties).Select(property => property.Name).ToList();
+            var proxyName = Name + "Xml";
+            while (propertyNames.Contains(proxyName)
+                || typeDeclaration.Members.Cast<CodeTypeMember>().Any(existing => existing.Name == proxyName || existing.Name.StartsWith(proxyName + "\n", StringComparison.Ordinal)))
+            {
+                proxyName += "_";
+            }
+
+            string nilField = null;
+            if (IsNillable && !IsRequired)
+            {
+                nilField = fieldName + "XmlAssigned";
+                while (propertyNames.Contains(nilField)
+                    || classModel.Properties.Any(property => OwningType.GetUniqueFieldName(property) == nilField)
+                    || typeDeclaration.Members.Cast<CodeTypeMember>().Any(existing => existing.Name == nilField))
+                {
+                    nilField += "_";
+                }
+                typeDeclaration.Members.Add(new CodeMemberField(typeof(bool), nilField) { Attributes = MemberAttributes.Private });
+                typeDeclaration.Members.Add(new CodeMemberMethod
+                {
+                    Attributes = MemberAttributes.Public | MemberAttributes.Final,
+                    Name = "ShouldSerialize" + proxyName,
+                    ReturnType = TypeRef<bool>(),
+                    Statements = { new CodeSnippetStatement($"            return {nilField} || ({fieldName} != null && {fieldName}.{countMember} > 0);") },
+                });
+            }
+
+            var proxyAccessors = CodeUtilities.NormalizeNewlines($@"
+        {{
+            get
+            {{
+                if ({fieldName} == null || {fieldName}.{countMember} == 0) return null;
+                return string.Join("" "", {fieldName});
+            }}
+            set
+            {{{(nilField == null ? "" : $"\n                {nilField} = true;")}
+                if (value == null)
+                {{
+                    {fieldName} = {emptyValue};
+                    return;
+                }}
+                var items = value.Split(new[] {{ ' ', '\t', '\r', '\n' }}, System.StringSplitOptions.RemoveEmptyEntries);
+                {fieldName} = {parsedValue};
+            }}
+        }}");
+            var proxyMember = new CodeMemberField(Configuration.EnableNullableDirective ? CreateLiteralTypeRef("string?") : TypeRef<string>(), proxyName + proxyAccessors)
+            {
+                Attributes = MemberAttributes.Public,
+            };
+            proxyMember.CustomAttributes.AddRange(attributes);
+            var editorBrowsableAttr = AttributeDecl<EditorBrowsableAttribute>();
+            editorBrowsableAttr.Arguments.Add(new(new CodeFieldReferenceExpression(TypeRefExpr<EditorBrowsableState>(), nameof(EditorBrowsableState.Never))));
+            proxyMember.CustomAttributes.Add(editorBrowsableAttr);
+            typeDeclaration.Members.Add(proxyMember);
+            Configuration.MemberVisitor(proxyMember, this);
+        }
+        else
+        {
+            member.CustomAttributes.AddRange(attributes);
+        }
 
         // initialize List<>
         if (isEnumerable && (Configuration.CollectionSettersMode != CollectionSettersMode.PublicWithoutConstructorInitialization)
@@ -530,6 +981,20 @@ public class PropertyModel(GeneratorConfiguration configuration, string name, Ty
 
         if (IsAny && Configuration.EntityFramework)
             member.CustomAttributes.Add(notMappedAttribute);
+
+        if (ChoiceGroupMemberships.Count > 0 && Configuration.GenerateChoiceGroupAttributes)
+        {
+            var attrTypeRef = new CodeTypeReference("XmlChoiceGroupAttribute");
+            foreach (var choiceGroupMembership in ChoiceGroupMemberships)
+            {
+                var choiceAttr = new CodeAttributeDeclaration(
+                    attrTypeRef,
+                    new CodeAttributeArgument(new CodePrimitiveExpression(choiceGroupMembership.GroupId)),
+                    new CodeAttributeArgument(new CodePrimitiveExpression(choiceGroupMembership.ArmId)),
+                    new CodeAttributeArgument(nameof(ChoiceGroupMembership.IsRequired), new CodePrimitiveExpression(choiceGroupMembership.IsRequired)));
+                member.CustomAttributes.Add(choiceAttr);
+            }
+        }
 
         Configuration.MemberVisitor(member, this);
     }

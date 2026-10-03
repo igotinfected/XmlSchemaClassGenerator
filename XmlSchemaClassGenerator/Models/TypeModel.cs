@@ -30,6 +30,37 @@ public abstract class TypeModel(GeneratorConfiguration configuration) : Generato
         }
     }
 
+    /// <summary>
+    /// Resolves a CLR type name to its C# keyword alias using the built-in
+    /// <see cref="CodeDomProvider"/>. For example, <c>"System.String"</c> becomes
+    /// <c>"string"</c> and <c>"System.Int32"</c> becomes <c>"int"</c>.
+    /// Non-aliased types are returned unchanged.
+    /// Thread-safe: acquires <see cref="CSharpProviderLock"/>.
+    /// </summary>
+    internal static string ResolveCSharpTypeAlias(string clrTypeName)
+    {
+        lock (CSharpProviderLock)
+        {
+            return CSharpProvider.GetTypeOutput(new CodeTypeReference(clrTypeName));
+        }
+    }
+
+    /// <summary>
+    /// Renders a <see cref="CodeTypeReference"/> to its C# source representation
+    /// using the built-in <see cref="CodeDomProvider"/>. Handles generics, arrays,
+    /// and type alias resolution.
+    /// For example, a reference to <c>System.Collections.Generic.List&lt;System.String&gt;</c>
+    /// becomes <c>System.Collections.Generic.List&lt;string&gt;</c>.
+    /// Thread-safe: acquires <see cref="CSharpProviderLock"/>.
+    /// </summary>
+    internal static string GetCSharpTypeOutput(CodeTypeReference typeRef)
+    {
+        lock (CSharpProviderLock)
+        {
+            return CSharpProvider.GetTypeOutput(typeRef);
+        }
+    }
+
     public NamespaceModel Namespace { get; set; }
     public XmlSchemaElement RootElement { get; set; }
     public XmlQualifiedName RootElementName { get; set; }

@@ -30,6 +30,8 @@ from schema restrictions
 * Optionally generate interfaces for groups and attribute groups
 * Optionally generate one file per class
 * Support for nullable reference types (NRTs) through [`AllowNullAttribute`](https://docs.microsoft.com/en-us/dotnet/api/system.diagnostics.codeanalysis.allownullattribute) and [`MaybeNullAttribute`](https://docs.microsoft.com/en-us/dotnet/api/system.diagnostics.codeanalysis.maybenullattribute)
+* Optional `#nullable enable` directive with native nullable reference type syntax (`string?`) instead of attributes
+* Optional C# 11 `required` modifier on properties corresponding to required XSD elements and attributes
 * Optionally generate a common specific type for union member types
 
 Unsupported:
@@ -48,169 +50,74 @@ For command line use, choose your preferred installation:
 - .NET Core CLI tool available in the [dotnet-xscgen NuGet package](https://www.nuget.org/packages/dotnet-xscgen/)
 - CI Builds are available at the NuGet feed https://ci.appveyor.com/nuget/xmlschemaclassgenerator-0f1t3r6ti475
 
-<pre>
+```
 Usage: xscgen [OPTIONS]+ xsdFile...
 Generate C# classes from XML Schema files.
-Version ...
 xsdFiles may contain globs, e.g. "content\{schema,xsd}\**\*.xsd", and URLs.
 Append - to option to disable it, e.g. --interface-.
+```
 
-Options:
-  -h, --help                 show this message and exit
-  -n, --namespace=VALUE      map an XML namespace to a C# namespace
-                               Separate XML namespace and C# namespace by '='.
-                               A single value (no '=') is taken as the C#
-                               namespace the empty XML namespace is mapped to.
-                               One option must be given for each namespace to
-                               be mapped.
-                               A file name may be given by appending a pipe
-                               sign (|) followed by a file name (like schema.
-                               xsd) to the XML namespace.
-                               If no mapping is found for an XML namespace, a
-                               name is generated automatically (may fail).
-      --nf, --namespaceFile=VALUE
-                             file containing mappings from XML namespaces to C#
-                               namespaces
-                               The line format is one mapping per line: XML
-                               namespace = C# namespace [optional file name].
-                               Lines starting with # and empty lines are
-                               ignored.
-      --tns, --typeNameSubstitute=VALUE
-                             substitute a generated type/member name
-                               Separate type/member name and substitute name by
-                               '='.
-                               Prefix type/member name with an appropriate kind
-                               ID as documented at: <a href="https://t.ly/HHEI">https://t.ly/HHEI</a>.
-                               Prefix with 'A:' to substitute any type/member.
-      --tnsf, --typeNameSubstituteFile=VALUE
-                             file containing generated type/member name
-                               substitute mappings
-                               The line format is one mapping per line:
-                               prefixed type/member name = substitute name.
-                               Lines starting with # and empty lines are
-                               ignored.
-  -o, --output=FOLDER        the FOLDER to write the resulting .cs files to
-  -d, --datetime-offset      map xs:datetime, xs:date and xs:time to System.
-                                DateTimeOffset instead of System.DateTime
-      --do, --dateOnly       map xs:date and xs:time to System.DateOnly and
-                                System.TimeOnly instead of System.DateTime
-  -i, --integer=TYPE         map xs:integer and derived types to TYPE instead
-                               of automatic approximation
-                               TYPE can be i[nt], l[ong], or d[ecimal]
-      --fb, --fallback, --use-integer-type-as-fallback
-                             use integer type specified via -i only if no type
-                               can be deduced
-  -e, --edb, --enable-data-binding
-                             enable INotifyPropertyChanged data binding
-  -r, --order                emit order for all class members stored as XML
-                               element
-  -c, --pcl                  PCL compatible output
-  -p, --prefix=PREFIX        the PREFIX to prepend to auto-generated namespace
-                               names
-  -v, --verbose              print generated file names on stdout
-  -0, --nullable             generate nullable adapter properties for optional
-                               elements/attributes w/o default values
-  -f, --ef                   generate Entity Framework Code First compatible
-                               classes
-  -t, --interface            generate interfaces for groups and attribute
-                               groups (default is enabled)
-  -a, --pascal               use Pascal case for class and property names (
-                               default is enabled)
-      --av, --assemblyVisible
-                             use the internal visibility modifier (default is
-                               false)
-  -u, --enableUpaCheck       should XmlSchemaSet check for Unique Particle
-                               Attribution (UPA) (default is enabled)
-      --ct, --collectionType=VALUE
-                             collection type to use (default is System.
-                               Collections.ObjectModel.Collection`1)
-      --cit, --collectionImplementationType=VALUE
-                             the default collection type implementation to use (
-                               default is null)
-      --csm, --collectionSettersMode=Private, Public, PublicWithoutConstructorInitialization, Init, InitWithoutConstructorInitialization
-                             generate a private, public, or init-only setter
-                               with or without backing field initialization for
-                               collections
-                               (default is Private; can be: Private, Public,
-                               PublicWithoutConstructorInitialization, Init,
-                               InitWithoutConstructorInitialization)
-      --ctro, --codeTypeReferenceOptions=GlobalReference, GenericTypeParameter
-                             the default CodeTypeReferenceOptions Flags to use (
-                               default is unset; can be: GlobalReference,
-                               GenericTypeParameter)
-      --tvpn, --textValuePropertyName=VALUE
-                             the name of the property that holds the text value
-                               of an element (default is Value)
-      --dst, --debuggerStepThrough
-                             generate DebuggerStepThroughAttribute (default is
-                               enabled)
-      --dc, --disableComments
-                             do not include comments from xsd
-      --nu, --noUnderscore   do not generate underscore in private member name (
-                               default is false)
-      --da, --description    generate DescriptionAttribute (default is true)
-      --cc, --complexTypesForCollections
-                             generate complex types for collections (default is
-                               true)
-  -s, --useShouldSerialize   use ShouldSerialize pattern instead of Specified
-                               pattern (default is false)
-      --sf, --separateFiles  generate a separate file for each class (default
-                               is false)
-      --nh, --namespaceHierarchy
-                             generate a separate folder for namespace hierarchy.
-                                Implies "separateFiles" if true (default is
-                               false)
-      --sg, --separateSubstitutes
-                             generate a separate property for each element of a
-                               substitution group (default is false)
-      --dnfin, --doNotForceIsNullable
-                             do not force generator to emit IsNullable = true
-                               in XmlElement annotation for nillable elements
-                               when element is nullable (minOccurs < 1 or
-                               parent element is choice) (default is false)
-      --cn, --compactTypeNames
-                             use type names without namespace qualifier for
-                               types in the using list (default is false)
-      --cl, --commentLanguages=VALUE
-                             comment languages to use (default is en; supported
-                               are en, de)
-      --un, --uniqueTypeNames
-                             generate type names that are unique across
-                               namespaces (default is false)
-      --gc, --generatedCodeAttribute
-                             add version information to GeneratedCodeAttribute (
-                               default is true)
-      --nc, --netCore        generate .NET Core specific code that might not
-                               work with .NET Framework (default is false)
-      --nr, --nullableReferenceAttributes
-                             generate attributes for nullable reference types (
-                               default is false)
-      --ar, --useArrayItemAttribute
-                             use ArrayItemAttribute for sequences with single
-                               elements (default is true)
-      --es, --enumAsString   Use string instead of enum for enumeration
-      --ca, --commandArgs    generate a comment with the exact command line
-                               arguments that were used to generate the source
-                               code (default is true)
-      --uc, --unionCommonType
-                             generate a common type for unions if possible (
-                               default is false)
-      --dtd, --allowDtdParse
-                             allow DTD parsing (default is false)
-      --oxi, --omitXmlIncludeAttribute
-                             omit generation of XmlIncludeAttribute for derived
-                               types (default is false)
-      --ecl, --enumCollection
-                             generate typed enum collections for xs:list types
-                             instead of string collections (default is false)
-      --ns, --namingScheme   use the specified naming scheme for class and
-                               property names (default is Pascal; can be:
-                               Direct, Pascal, Legacy)
-      --fu, --forceUriScheme=VALUE
-                             force URI scheme when resolving URLs (default is
-                               none; can be: none, same, or any defined value
-                               for scheme, like https or http)
-</pre>
+| Option | Description |
+| ------ | ----------- |
+| `-h`, `--help` | Show help and exit |
+| `-n`, `--namespace=VALUE` | Map an XML namespace to a C# namespace. Separate XML namespace and C# namespace by `=`. A single value (no `=`) is taken as the C# namespace the empty XML namespace is mapped to. One option must be given for each namespace to be mapped. A file name may be given by appending a pipe sign (`\|`) followed by a file name (like `schema.xsd`) to the XML namespace. If no mapping is found for an XML namespace, a name is generated automatically (may fail). |
+| `--nf`, `--namespaceFile=VALUE` | File containing namespace mappings (one per line: `XML namespace = C# namespace [file name]`). Lines starting with `#` and empty lines are ignored. |
+| `--tns`, `--typeNameSubstitute=VALUE` | Substitute a generated type/member name. Separate type/member name and substitute name by `=`. Prefix with a kind ID as [documented here](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-specification/documentation-comments#d42-id-string-format). Prefix with `A:` to substitute any type/member. |
+| `--tnsf`, `--typeNameSubstituteFile=VALUE` | File containing type/member name substitutions (one per line: `prefixed name = substitute`). Lines starting with `#` and empty lines are ignored. |
+| `-o`, `--output=FOLDER` | The folder to write the resulting `.cs` files to |
+| `-d`, `--datetime-offset` | Map `xs:datetime` and derived types to `System.DateTimeOffset` instead of `System.DateTime` |
+| `--do`, `--dateOnly` | Map `xs:date` to `System.DateOnly` and `xs:time` to `System.TimeOnly` |
+| `-i`, `--integer=TYPE` | Map `xs:integer` and derived types to TYPE instead of automatic approximation. TYPE can be `i[nt]`, `l[ong]`, or `d[ecimal]` |
+| `--fb`, `--fallback` | Use integer type specified via `-i` only if no type can be deduced |
+| `-e`, `--edb`, `--enable-data-binding` | Enable `INotifyPropertyChanged` data binding |
+| `-r`, `--order` | Emit order for all class members stored as XML element |
+| `-c`, `--pcl` | PCL compatible output |
+| `-p`, `--prefix=PREFIX` | The prefix to prepend to auto-generated namespace names |
+| `-v`, `--verbose` | Print generated file names on stdout |
+| `-0`, `--nullable` | Generate nullable adapter properties for optional elements/attributes without default values |
+| `-f`, `--ef` | Generate Entity Framework Code First compatible classes |
+| `-t`, `--interface` | Generate interfaces for groups and attribute groups (default: enabled) |
+| `-a`, `--pascal` | Use Pascal case for class and property names (default: enabled) |
+| `--av`, `--assemblyVisible` | Use the `internal` visibility modifier (default: false) |
+| `-u`, `--enableUpaCheck` | Check for Unique Particle Attribution (UPA) in `XmlSchemaSet` (default: enabled) |
+| `--ct`, `--collectionType=VALUE` | Collection type to use (default: `System.Collections.ObjectModel.Collection`1`) |
+| `--cit`, `--collectionImplementationType=VALUE` | Collection type implementation to use (default: null) |
+| `--csm`, `--collectionSettersMode=VALUE` | Collection setter mode: `Private`, `Public`, `PublicWithoutConstructorInitialization`, `Init`, `InitWithoutConstructorInitialization` (default: `Private`) |
+| `--ctro`, `--codeTypeReferenceOptions=VALUE` | `CodeTypeReferenceOptions` flags: `GlobalReference`, `GenericTypeParameter` (default: unset) |
+| `--tvpn`, `--textValuePropertyName=VALUE` | Name of the property that holds the text value of an element (default: `Value`) |
+| `--dst`, `--debuggerStepThrough` | Generate `DebuggerStepThroughAttribute` (default: enabled) |
+| `--dc`, `--disableComments` | Do not include comments from XSD |
+| `--nu`, `--noUnderscore` | Do not generate underscore in private member name (default: false) |
+| `--da`, `--description` | Generate `DescriptionAttribute` (default: true) |
+| `--cc`, `--complexTypesForCollections` | Generate complex types for collections (default: true) |
+| `-s`, `--useShouldSerialize` | Use `ShouldSerialize` pattern instead of `Specified` pattern (default: false) |
+| `--sf`, `--separateFiles` | Generate a separate file for each class (default: false) |
+| `--nh`, `--namespaceHierarchy` | Generate a separate folder for namespace hierarchy; implies `--separateFiles` (default: false) |
+| `--sg`, `--separateSubstitutes` | Generate a separate property for each element of a substitution group (default: false) |
+| `--dnfin`, `--doNotForceIsNullable` | Do not force `IsNullable = true` in `XmlElement` annotation for nillable elements when element is nullable (default: false) |
+| `--cn`, `--compactTypeNames` | Use type names without namespace qualifier for types in the using list (default: false) |
+| `--cl`, `--commentLanguages=VALUE` | Comment languages to use (default: `en`; supported: `en`, `de`) |
+| `--un`, `--uniqueTypeNames` | Generate type names that are unique across namespaces (default: false) |
+| `--gc`, `--generatedCodeAttribute` | Add version information to `GeneratedCodeAttribute` (default: true) |
+| `--nc`, `--netCore` | Generate .NET Core specific code that might not work with .NET Framework (default: false) |
+| `--nr`, `--nullableReferenceAttributes` | Generate `[AllowNull]`/`[MaybeNull]` attributes for nullable reference types (default: false) |
+| `--st`, `--strict` | Enable all strict compile-time enforcement options: `--nd`, `--rm`, `--cg`, `--ecl`, `--fv`, `--rb` (default: false). Individual flags placed after `--strict` override it, e.g. `--strict --rm-` |
+| `--nd`, `--nullableDirective` | Emit `#nullable enable` and use native nullable reference type syntax (`string?`) instead of attributes (default: false) |
+| `--rm`, `--requiredModifier` | Emit C# 11 `required` modifier on required properties, replacing `[Required]` attribute (default: false) |
+| `--cg`, `--choiceGroupAttributes` | Emit `[XmlChoiceGroup]` attributes on choice element properties for Roslyn analyzer enforcement (default: false) |
+| `--fv`, `--fixedValues` | Generate read-only (getter-only) properties for fixed-value elements and attributes (default: false) |
+| `--rb`, `--rangeBounds` | Emit `[Range]` even when only one bound (`minInclusive` or `maxInclusive`) is present, filling the missing bound from the CLR type (default: false) |
+| `--ar`, `--useArrayItemAttribute` | Use `ArrayItemAttribute` for sequences with single elements (default: true) |
+| `--es`, `--enumAsString` | Use `string` instead of `enum` for enumerations |
+| `--dmb`, `--disableMergeRestrictionsWithBase` | Disable merging of simple type restrictions with base type restrictions |
+| `--ca`, `--commandArgs` | Generate a comment with the exact command line arguments used to generate the source code (default: true) |
+| `--uc`, `--unionCommonType` | Generate a common type for unions if possible (default: false) |
+| `--ec`, `--serializeEmptyCollections` | Serialize empty collections (default: false) |
+| `--dtd`, `--allowDtdParse` | Allow DTD parsing (default: false) |
+| `--oxi`, `--omitXmlIncludeAttribute` | Omit generation of `XmlIncludeAttribute` for derived types (default: false) |
+| `--ecl`, `--enumCollection` | Generate typed enum collections for `xs:list` types instead of string collections (default: false) |
+| `--ns`, `--namingScheme=VALUE` | Naming scheme for class and property names: `Direct`, `Pascal`, `Legacy` (default: `Pascal`) |
+| `--fu`, `--forceUriScheme=VALUE` | Force URI scheme when resolving URLs (default: `none`; can be: `none`, `same`, or any scheme like `https`) |
 
 For use from code use the [library NuGet package](https://www.nuget.org/packages/XmlSchemaClassGenerator-beta/):
 
@@ -359,6 +266,50 @@ public System.Nullable<int> Id
         this.IdValue = value.GetValueOrDefault();
         this.IdValueSpecified = value.HasValue;
     }
+}
+```
+
+Strict mode and compile-time enforcement<a name="nullable-directive"></a>
+-----------------------------------------
+
+The `--strict` flag (`--st`) enables all strict compile-time enforcement options at once: `--nd`, `--rm`, `--cg`, `--ecl`, `--fv`, and `--rb`. Individual flags placed **after** `--strict` on the command line override it, e.g. `--strict --rm-` enables everything except the `required` modifier. This is the recommended mode for new projects.
+
+The following options control the individual strict features:
+
+| Option | C# version | What it does |
+| ------ | ---------- | ------------ |
+| `--nr` / `--nullableReferenceAttributes` | C# 8+ | Adds `[AllowNull]` and `[MaybeNull]` attributes to optional reference-type properties |
+| `--nd` / `--nullableDirective` | C# 8+ | Emits `#nullable enable` at the top of each file and uses native `?` syntax (`string?`) instead of attributes. Also suppresses `[DefaultValueAttribute]` for optional nullable reference-type properties (see below) |
+| `--rm` / `--requiredModifier` | C# 11+ | Adds the `required` modifier to properties corresponding to required XSD elements (`minOccurs >= 1`) or attributes (`use="required"`), replacing the `[Required]` attribute |
+| `--cg` / `--choiceGroupAttributes` | Any | Emits `[XmlChoiceGroup(groupId, armId)]` attributes on choice element properties, enabling the companion Roslyn analyzer to enforce mutual exclusivity at compile time |
+| `--ecl` / `--enumCollection` | Any | Generates typed enum collections for `xs:list` types, ensuring enum values are matched exactly during serialization |
+| `--fv` / `--fixedValues` | Any | Generates read-only (getter-only) properties for elements and attributes with `fixed` values, preventing accidental overwrite at compile time |
+| `--rb` / `--rangeBounds` | Any | Emits `[Range]` attributes even when only one bound (`minInclusive`/`maxInclusive`) is specified; the missing bound is filled from the CLR type's min/max. Also considers `minExclusive`/`maxExclusive` bounds |
+
+`--nd` supersedes `--nr`: when `--nd` is active, optional reference-type properties use `string?` directly and the `[AllowNull]`/`[MaybeNull]` attributes are not emitted (except for array types where the `?` suffix cannot be applied through CodeDom). Similarly, `--rm` supersedes `[Required]`: the `required` keyword provides strictly stronger compile-time enforcement, so the `[Required]` attribute is no longer emitted.
+
+`--nd` also suppresses `[DefaultValueAttribute]` for optional nullable reference-type properties. Without this, `XmlSerializer` compares the property value to the `[DefaultValue]` and **omits** the element from the XML when they match -- meaning a property initialized to its default can never serialize that default. Under `#nullable enable`, the nullable contract replaces `[DefaultValue]` for controlling serialization: `null` means the element is absent, and any non-null value (including the default) is serialized. The backing field is still initialized to the XSD default value, so newly constructed objects start with the correct default. Value-type properties are unaffected and continue to use `[DefaultValueAttribute]` normally.
+
+Using `--nd` and `--rm` together gives the strongest compile-time safety: the compiler will warn on uninitialized non-nullable properties and error on missing `required` properties in object initializers.
+
+```C#
+#nullable enable
+
+[XmlTypeAttribute("PublicationDeliveryStructure", Namespace="http://www.netex.org.uk/netex")]
+[XmlRootAttribute("PublicationDelivery", Namespace="http://www.netex.org.uk/netex")]
+public partial class PublicationDeliveryStructure
+{
+    [XmlElementAttribute("PublicationTimestamp", Order=0)]
+    public required DateTimeOffset PublicationTimestamp { get; set; }
+
+    [XmlElementAttribute("ParticipantRef", Order=1)]
+    public required string ParticipantRef { get; set; }
+
+    [XmlElementAttribute("PublicationRequest", Order=2)]
+    public PublicationRequestStructure? PublicationRequest { get; set; }
+
+    [XmlElementAttribute("Description", Order=3)]
+    public MultilingualString? Description { get; set; }
 }
 ```
 

@@ -1,4 +1,4 @@
-﻿using System.CodeDom;
+using System.CodeDom;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -20,6 +20,13 @@ public class NamespaceModel(NamespaceKey key, GeneratorConfiguration configurati
 
         foreach (var (Namespace, _) in CodeUtilities.UsingNamespaces.Where(n => n.Condition(conf)).OrderBy(n => n.Namespace))
             codeNamespace.Imports.Add(new CodeNamespaceImport(Namespace));
+
+        if (conf.GenerateChoiceGroupAttributes)
+        {
+            var choiceGroupNs = ModelBuilder.GetChoiceGroupAttributeNamespace(conf);
+            if (choiceGroupNs != namespaceName)
+                codeNamespace.Imports.Add(new CodeNamespaceImport(choiceGroupNs));
+        }
 
         foreach (var typeModel in parts.SelectMany(x => x.Types.Values).ToList())
         {

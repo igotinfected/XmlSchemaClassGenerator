@@ -378,6 +378,60 @@ public class Generator
         set { _configuration.EnumCollection = value; }
     }
 
+    public bool EnableNullableDirective
+    {
+        get { return _configuration.EnableNullableDirective; }
+        set { _configuration.EnableNullableDirective = value; }
+    }
+
+    public bool GenerateRequiredModifier
+    {
+        get { return _configuration.GenerateRequiredModifier; }
+        set { _configuration.GenerateRequiredModifier = value; }
+    }
+
+    public bool GenerateDefaultValueAttribute
+    {
+        get { return _configuration.GenerateDefaultValueAttribute; }
+        set { _configuration.GenerateDefaultValueAttribute = value; }
+    }
+
+    public bool UseShouldSerializeForDefaultValues
+    {
+        get { return _configuration.UseShouldSerializeForDefaultValues; }
+        set { _configuration.UseShouldSerializeForDefaultValues = value; }
+    }
+
+    public bool GenerateChoiceGroupAttributes
+    {
+        get { return _configuration.GenerateChoiceGroupAttributes; }
+        set { _configuration.GenerateChoiceGroupAttributes = value; }
+    }
+
+    public string ChoiceGroupAttributeNamespace
+    {
+        get { return _configuration.ChoiceGroupAttributeNamespace; }
+        set { _configuration.ChoiceGroupAttributeNamespace = value; }
+    }
+
+    public bool GenerateStrictFixedValues
+    {
+        get { return _configuration.GenerateStrictFixedValues; }
+        set { _configuration.GenerateStrictFixedValues = value; }
+    }
+
+    public bool GenerateStrictRangeBounds
+    {
+        get { return _configuration.GenerateStrictRangeBounds; }
+        set { _configuration.GenerateStrictRangeBounds = value; }
+    }
+
+    public bool GenerateStrict
+    {
+        get { return _configuration.GenerateStrict; }
+        set { _configuration.GenerateStrict = value; }
+    }
+
     public bool ValidationError { get; private set; }
 
     static Generator()

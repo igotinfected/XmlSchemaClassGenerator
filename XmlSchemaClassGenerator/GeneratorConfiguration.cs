@@ -376,4 +376,96 @@ public class GeneratorConfiguration
     /// instead of falling back to string collections. Default is false.
     /// </summary>
     public bool EnumCollection { get; set; }
+
+    /// <summary>
+    /// Emit <c>#nullable enable</c> at the top of each generated file
+    /// and use native nullable reference type syntax (<c>string?</c>) instead of
+    /// <c>[AllowNull]</c>/<c>[MaybeNull]</c> attributes. Default is false.
+    /// </summary>
+    public bool EnableNullableDirective { get; set; }
+
+    /// <summary>
+    /// Emit the C# 11 <c>required</c> modifier on properties that correspond to
+    /// required XSD elements (<c>minOccurs &gt;= 1</c>) or attributes (<c>use="required"</c>).
+    /// When enabled, the <c>[Required]</c> data annotation attribute is no longer emitted
+    /// as the <c>required</c> keyword provides strictly stronger compile-time enforcement.
+    /// Recommended to use together with <see cref="EnableNullableDirective"/> for
+    /// the strongest compile-time safety. Default is false.
+    /// </summary>
+    public bool GenerateRequiredModifier { get; set; }
+
+    /// <summary>
+    /// Emit <see cref="System.ComponentModel.DefaultValueAttribute"/> for optional properties
+    /// with XSD defaults. XmlSerializer omits values that equal this attribute, even when they
+    /// were explicitly assigned. Default is true for backwards compatibility.
+    /// </summary>
+    public bool GenerateDefaultValueAttribute { get; set; } = true;
+
+    /// <summary>
+    /// Track assignment of optional scalar properties with XSD defaults. Untouched properties
+    /// return the default but are omitted from XML. Explicit assignments, including defaults
+    /// and nil values, are serialized. Overrides <see cref="GenerateDefaultValueAttribute"/>
+    /// for these properties. Default is false.
+    /// </summary>
+    public bool UseShouldSerializeForDefaultValues { get; set; }
+
+
+    /// <summary>
+    /// Emit <c>[XmlChoiceGroup(groupId, armId)]</c> attributes on properties that correspond
+    /// to elements within an <c>xsd:choice</c> group. This metadata can be consumed by a Roslyn
+    /// analyzer to enforce mutual exclusivity at compile time. Default is false.
+    /// </summary>
+    public bool GenerateChoiceGroupAttributes { get; set; }
+
+    /// <summary>
+    /// Generate getter-only properties for XSD fixed values and hidden writable XML proxies
+    /// that reject values which differ from the fixed constraint. Required values serialize
+    /// automatically. Optional values serialize after deserialization or an explicit call to
+    /// the generated Include method. Default is false.
+    /// </summary>
+    public bool GenerateStrictFixedValues { get; set; }
+
+    /// <summary>
+    /// When enabled, a <c>[Range]</c> attribute is emitted even when only one bound
+    /// (<c>minInclusive</c> or <c>maxInclusive</c>) is specified in the XSD restriction.
+    /// The missing bound is filled in with the CLR type's minimum or maximum value.
+    /// Without this flag, both bounds must be present for <c>[Range]</c> to be emitted.
+    /// Default is false.
+    /// </summary>
+    public bool GenerateStrictRangeBounds { get; set; }
+
+    /// <summary>
+    /// The namespace in which the generated <c>XmlChoiceGroupAttribute</c> class is placed.
+    /// When set, this value is used directly. When <c>null</c>, falls back to
+    /// <see cref="NamespacePrefix"/> if non-empty, otherwise uses <c>"XmlChoiceGroupAttributes"</c>.
+    /// </summary>
+    public string ChoiceGroupAttributeNamespace { get; set; }
+
+    private bool _generateStrict;
+
+    /// <summary>
+    /// Convenience flag that enables all strict compile-time enforcement options at once:
+    /// <see cref="EnableNullableDirective"/>, <see cref="GenerateRequiredModifier"/>,
+    /// <see cref="GenerateChoiceGroupAttributes"/>, <see cref="EnumCollection"/>,
+    /// <see cref="GenerateStrictFixedValues"/>, and <see cref="GenerateStrictRangeBounds"/>.
+    /// <para>
+    /// Individual flags set <em>after</em> this property override it, e.g. on the CLI
+    /// <c>--strict --rm-</c> enables everything except <see cref="GenerateRequiredModifier"/>.
+    /// </para>
+    /// Default is false.
+    /// </summary>
+    public bool GenerateStrict
+    {
+        get => _generateStrict;
+        set
+        {
+            _generateStrict = value;
+            EnableNullableDirective = value;
+            GenerateRequiredModifier = value;
+            GenerateChoiceGroupAttributes = value;
+            EnumCollection = value;
+            GenerateStrictFixedValues = value;
+            GenerateStrictRangeBounds = value;
+        }
+    }
 }
