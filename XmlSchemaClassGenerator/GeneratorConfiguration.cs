@@ -395,6 +395,22 @@ public class GeneratorConfiguration
     public bool GenerateRequiredModifier { get; set; }
 
     /// <summary>
+    /// Emit <see cref="System.ComponentModel.DefaultValueAttribute"/> for optional properties
+    /// with XSD defaults. XmlSerializer omits values that equal this attribute, even when they
+    /// were explicitly assigned. Default is true for backwards compatibility.
+    /// </summary>
+    public bool GenerateDefaultValueAttribute { get; set; } = true;
+
+    /// <summary>
+    /// Track assignment of optional scalar properties with XSD defaults. Untouched properties
+    /// return the default but are omitted from XML. Explicit assignments, including defaults
+    /// and nil values, are serialized. Overrides <see cref="GenerateDefaultValueAttribute"/>
+    /// for these properties. Default is false.
+    /// </summary>
+    public bool UseShouldSerializeForDefaultValues { get; set; }
+
+
+    /// <summary>
     /// Emit <c>[XmlChoiceGroup(groupId, armId)]</c> attributes on properties that correspond
     /// to elements within an <c>xsd:choice</c> group. This metadata can be consumed by a Roslyn
     /// analyzer to enforce mutual exclusivity at compile time. Default is false.
@@ -402,11 +418,10 @@ public class GeneratorConfiguration
     public bool GenerateChoiceGroupAttributes { get; set; }
 
     /// <summary>
-    /// When enabled, properties whose XSD element or attribute has a <c>fixed</c> value are
-    /// generated as read-only (getter-only) properties initialized to the fixed value.
-    /// This prevents callers from accidentally overwriting the value at compile time.
-    /// XmlSerializer will still serialize the fixed value (it reads the getter) but will
-    /// silently skip it during deserialization (no setter). Default is false.
+    /// Generate getter-only properties for XSD fixed values and hidden writable XML proxies
+    /// that reject values which differ from the fixed constraint. Required values serialize
+    /// automatically. Optional values serialize after deserialization or an explicit call to
+    /// the generated Include method. Default is false.
     /// </summary>
     public bool GenerateStrictFixedValues { get; set; }
 

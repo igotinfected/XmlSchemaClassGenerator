@@ -390,6 +390,18 @@ public class Generator
         set { _configuration.GenerateRequiredModifier = value; }
     }
 
+    public bool GenerateDefaultValueAttribute
+    {
+        get { return _configuration.GenerateDefaultValueAttribute; }
+        set { _configuration.GenerateDefaultValueAttribute = value; }
+    }
+
+    public bool UseShouldSerializeForDefaultValues
+    {
+        get { return _configuration.UseShouldSerializeForDefaultValues; }
+        set { _configuration.UseShouldSerializeForDefaultValues = value; }
+    }
+
     public bool GenerateChoiceGroupAttributes
     {
         get { return _configuration.GenerateChoiceGroupAttributes; }

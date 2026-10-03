@@ -1017,6 +1017,7 @@ internal class ModelBuilder
                     var groupContext = item.ChoiceGroupMemberships.Count > 0
                         ? ChoiceContext.ForGroupRef(item.ChoiceGroupMemberships, item.MinOccurs >= 1.0m)
                         : new ChoiceContext().EnterNonChoiceCompositor(item.MinOccurs >= 1.0m);
+                    groupContext = groupContext.EnterNonChoiceCompositor(item.MinOccurs >= 1.0m, item.MaxOccurs > 1.0m);
                     var groupItems = GetElements(groupRef.Particle, groupContext).ToList();
                     var groupProperties = CreatePropertiesForElements(source, owningTypeModel, item, groupItems, order: order, passProperties: false).ToList();
                     if (_configuration.EmitOrder)
@@ -1159,14 +1160,14 @@ internal class ModelBuilder
         if (groupBase?.Items == null)
             yield break;
 
-        if (groupBase is XmlSchemaChoice)
+        if (groupBase is XmlSchemaChoice && groupBase.MaxOccurs <= 1.0m && !context.IsRepeated)
         {
             // This is a choice compositor. Only flatten into the parent if
             // the immediate parent is also a choice (directly nested).
             if (!context.IsDirectlyInsideChoice)
             {
                 // New top-level or non-directly-nested choice → own group.
-                context = context.EnterChoice(_nextChoiceGroupId++, context.EffectiveIsRequired && groupBase.MinOccurs >= 1.0m);
+                context = context.EnterChoice(_nextChoiceGroupId++, context.EffectiveIsRequired && !IsEmptiable(groupBase));
             }
             // else: directly nested choice (choice > choice) — reuse the outer
             // group ID and continue arm numbering from where the parent left off.
@@ -1183,7 +1184,7 @@ internal class ModelBuilder
                 // Each direct child of a choice is a separate arm. For nested choices,
                 // the recursive call already advanced the arm counter for each of its
                 // children. For sequences and single elements, we advance after processing.
-                if (item is not XmlSchemaChoice)
+                if (item is not XmlSchemaChoice nestedChoice || nestedChoice.MaxOccurs > 1.0m)
                     context.AdvanceArm();
             }
         }
@@ -1192,7 +1193,7 @@ internal class ModelBuilder
             // Sequence or All — elements inherit the outer choice context (same group/arm)
             // but we mark that we're no longer directly inside a choice, so any nested
             // choices encountered will start their own group rather than flattening.
-            var innerContext = context.EnterNonChoiceCompositor(groupBase.MinOccurs >= 1.0m);
+            var innerContext = context.EnterNonChoiceCompositor(groupBase.MinOccurs >= 1.0m, groupBase.MaxOccurs > 1.0m);
 
             foreach (var item in groupBase.Items)
             {
@@ -1204,6 +1205,29 @@ internal class ModelBuilder
                 }
             }
         }
+    }
+
+    private static bool IsEmptiable(XmlSchemaParticle particle)
+    {
+        if (particle.MinOccurs == 0)
+        {
+            return true;
+        }
+
+        return particle switch
+        {
+            XmlSchemaChoice choice => choice.Items
+                .OfType<XmlSchemaParticle>()
+                .Any(IsEmptiable),
+            XmlSchemaSequence sequence => sequence.Items
+                .OfType<XmlSchemaParticle>()
+                .All(IsEmptiable),
+            XmlSchemaAll all => all.Items
+                .OfType<XmlSchemaParticle>()
+                .All(IsEmptiable),
+            XmlSchemaGroupRef groupRef when groupRef.Particle != null => IsEmptiable(groupRef.Particle),
+            _ => false,
+        };
     }
 
     public IEnumerable<Particle> GetElements(XmlSchemaObject item, XmlSchemaObject parent)

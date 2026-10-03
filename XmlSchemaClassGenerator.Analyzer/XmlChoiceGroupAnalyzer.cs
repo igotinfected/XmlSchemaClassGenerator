@@ -29,7 +29,7 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
     private static readonly DiagnosticDescriptor MissingRequiredChoiceGroupRule = new(
         MissingRequiredChoiceGroupDiagnosticId,
         title: "Missing required XmlChoiceGroup arm",
-        messageFormat: "Object initializer for '{0}' must set a property from required xs:choice group (groupId={1})",
+        messageFormat: "Object initializer for '{0}' must set one of these properties from required xs:choice group {1}: {2}",
         category: "Usage",
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true,
@@ -56,26 +56,35 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        var requiredGroupIds = GetRequiredChoiceGroupIds(objectCreation.Type);
-        if (requiredGroupIds.Count == 0)
+        var requiredGroups = GetRequiredChoiceGroups(objectCreation.Type);
+        if (requiredGroups.Count == 0)
         {
             return;
         }
 
-        var assignedGroupIds = GetAssignedChoiceGroupIds(objectCreation.Initializer);
+        var assignedChoices = GetAssignedChoices(objectCreation.Initializer);
 
-        foreach (var requiredGroupId in requiredGroupIds)
+        foreach (var requiredGroup in requiredGroups)
         {
-            if (assignedGroupIds.Contains(requiredGroupId))
+            if (assignedChoices.Any(choice => choice.GroupId == requiredGroup.GroupId) ||
+                requiredGroup.ParentChoices.Any(parent => !assignedChoices.Any(choice =>
+                    choice.GroupId == parent.GroupId && choice.ArmId == parent.ArmId)))
             {
                 continue;
             }
 
+            var candidatePropertyNames = string.Join(", ", requiredGroup.PropertyNames.Select(name => $"'{name}'"));
+            var properties = ImmutableDictionary<string, string?>.Empty
+                .Add("ChoiceGroupId", requiredGroup.GroupId.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                .Add("ChoiceGroupCandidateProperties", string.Join(",", requiredGroup.PropertyNames));
+
             context.ReportDiagnostic(Diagnostic.Create(
                 MissingRequiredChoiceGroupRule,
                 objectCreation.Syntax.GetLocation(),
+                properties,
                 objectCreation.Type.Name,
-                requiredGroupId));
+                requiredGroup.GroupId,
+                candidatePropertyNames));
         }
     }
 
@@ -126,11 +135,10 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
     /// Transfer: when we see <c>receiver.Property = value</c> and the property has
     /// <c>[XmlChoiceGroup(groupId, armId)]</c>, record the arm.
     ///
-    /// Merge at join points: union the arm sets from all predecessors (must-analysis:
-    /// an arm is in the merged state only if it appears on ALL incoming paths).
+    /// Merge at join points: union the arm sets from all predecessors.
     ///
-    /// Report: when a block's exit state has two distinct arm IDs for the same group
-    /// on the same receiver.
+    /// Report: when an assignment selects a different arm from one that may already
+    /// be set on the same receiver.
     /// </summary>
     private static void AnalyzeControlFlowGraph(OperationBlockAnalysisContext context, ControlFlowGraph cfg)
     {
@@ -168,17 +176,14 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
             // Process operations in this block.
             foreach (var operation in block.Operations)
             {
-                ProcessOperation(operation, state, captureToReceiver);
+                ProcessOperation(operation, state, captureToReceiver, context, reportedDiagnostics);
             }
 
             // Process branch value if present.
             if (block.BranchValue != null)
             {
-                ProcessOperation(block.BranchValue, state, captureToReceiver);
+                ProcessOperation(block.BranchValue, state, captureToReceiver, context, reportedDiagnostics);
             }
-
-            // Report conflicts in the current block's exit state.
-            ReportConflicts(context, state, reportedDiagnostics);
 
             // Propagate to successors.
             PropagateToSuccessor(block.FallThroughSuccessor, state, blockEntryState, worklist);
@@ -218,12 +223,14 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
     private static void ProcessOperation(
         IOperation operation,
         FlowState state,
-        Dictionary<CaptureId, ReceiverKey> captureToReceiver)
+        Dictionary<CaptureId, ReceiverKey> captureToReceiver,
+        OperationBlockAnalysisContext context,
+        HashSet<string> reportedDiagnostics)
     {
         // Walk nested operations (the CFG flattens most things, but some nesting remains).
         foreach (var child in operation.ChildOperations)
         {
-            ProcessOperation(child, state, captureToReceiver);
+            ProcessOperation(child, state, captureToReceiver, context, reportedDiagnostics);
         }
 
         switch (operation)
@@ -232,6 +239,12 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
             // If the captured value is a local/parameter/field reference or another capture,
             // propagate the receiver mapping.
             case IFlowCaptureOperation capture:
+                if (capture.Value is IObjectCreationOperation)
+                {
+                    // a loop reuses capture IDs, but each allocation starts a new object.
+                    captureToReceiver.Remove(capture.Id);
+                    state.Receivers.Remove(new ReceiverKey(capture.Id));
+                }
                 var capturedReceiver = GetReceiverKey(capture.Value, captureToReceiver);
                 if (capturedReceiver != null)
                 {
@@ -252,6 +265,21 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
                         {
                             foreach (var choiceGroupInfo in choiceGroupInfos)
                             {
+                                if (IsOmittedNullAssignment(assignment, property))
+                                {
+                                    if (GetPropertiesIncludingBaseTypes(property.ContainingType).Count(candidate =>
+                                        GetChoiceGroupInfos(candidate).Any(info => info.GroupId == choiceGroupInfo.GroupId &&
+                                            info.ArmId == choiceGroupInfo.ArmId)) == 1 &&
+                                        state.Receivers.TryGetValue(receiver, out var groups) &&
+                                        groups.TryGetValue(choiceGroupInfo.GroupId, out var arms))
+                                    {
+                                        arms.Remove(choiceGroupInfo.ArmId);
+                                    }
+                                    continue;
+                                }
+
+                                ReportConflict(context, state, receiver, choiceGroupInfo, property.Name,
+                                    assignment.Syntax.GetLocation(), reportedDiagnostics);
                                 state.RecordAssignment(
                                     receiver,
                                     choiceGroupInfo.GroupId,
@@ -270,7 +298,11 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
                 {
                     var localKey = GetReceiverKey(assignment.Target, captureToReceiver);
                     var valueKey = GetReceiverKeyDirect(assignment.Value);
-                    if (localKey != null && valueKey != null)
+                    if (localKey != null && !localKey.Equals(valueKey))
+                    {
+                        state.Receivers.Remove(localKey);
+                    }
+                    if (localKey != null && valueKey != null && !localKey.Equals(valueKey))
                     {
                         // Map the capture to this local for future lookups.
                         if (valueKey.Kind == ReceiverKind.Capture && valueKey.CaptureId.HasValue)
@@ -353,49 +385,50 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static void ReportConflicts(
+    private static void ReportConflict(
         OperationBlockAnalysisContext context,
         FlowState state,
+        ReceiverKey receiver,
+        ChoiceGroupInfo choiceGroup,
+        string propertyName,
+        Location location,
         HashSet<string> reported)
     {
-        foreach (var receiverEntry in state.Receivers)
+        if (!state.Receivers.TryGetValue(receiver, out var groups) ||
+            !groups.TryGetValue(choiceGroup.GroupId, out var arms))
         {
-            foreach (var groupEntry in receiverEntry.Value)
+            return;
+        }
+
+        // merged arms may come from mutually exclusive branches, so only a new
+        // assignment can establish that two arms coexist on a path.
+        foreach (var existing in arms)
+        {
+            if (existing.Key == choiceGroup.ArmId)
             {
-                var groupId = groupEntry.Key;
-                var arms = groupEntry.Value;
-
-                if (arms.Count < 2) continue;
-
-                var armList = arms.ToList();
-                var first = armList[0];
-
-                for (var i = 1; i < armList.Count; i++)
-                {
-                    var conflicting = armList[i];
-
-                    // Build a dedup key from the group ID and the two locations.
-                    var loc1 = first.Value.Location.GetLineSpan().ToString();
-                    var loc2 = conflicting.Value.Location.GetLineSpan().ToString();
-                    var dedupKey = string.Compare(loc1, loc2, StringComparison.Ordinal) < 0
-                        ? $"{groupId}|{loc1}|{loc2}"
-                        : $"{groupId}|{loc2}|{loc1}";
-
-                    if (!reported.Add(dedupKey)) continue;
-
-                    var diagnostic = Diagnostic.Create(
-                        Rule,
-                        conflicting.Value.Location,
-                        additionalLocations: new[] { first.Value.Location },
-                        conflicting.Value.PropertyName,
-                        first.Value.PropertyName,
-                        groupId,
-                        conflicting.Key,
-                        first.Key);
-
-                    context.ReportDiagnostic(diagnostic);
-                }
+                continue;
             }
+
+            var loc1 = existing.Value.Location.GetLineSpan().ToString();
+            var loc2 = location.GetLineSpan().ToString();
+            var key = string.Compare(loc1, loc2, StringComparison.Ordinal) < 0
+                ? $"{choiceGroup.GroupId}|{loc1}|{loc2}"
+                : $"{choiceGroup.GroupId}|{loc2}|{loc1}";
+
+            if (reported.Add(key))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    Rule,
+                    location,
+                    additionalLocations: new[] { existing.Value.Location },
+                    propertyName,
+                    existing.Value.PropertyName,
+                    choiceGroup.GroupId,
+                    choiceGroup.ArmId,
+                    existing.Key));
+            }
+
+            break;
         }
     }
 
@@ -416,22 +449,42 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static HashSet<int> GetRequiredChoiceGroupIds(ITypeSymbol type)
+    private static List<RequiredChoiceGroupInfo> GetRequiredChoiceGroups(ITypeSymbol type)
     {
-        var groupIds = new HashSet<int>();
+        var memberships = new Dictionary<int, List<(IPropertySymbol Property, ChoiceGroupInfo ChoiceGroup)>>();
 
         foreach (var property in GetPropertiesIncludingBaseTypes(type))
         {
             foreach (var choiceGroupInfo in GetChoiceGroupInfos(property))
             {
-                if (choiceGroupInfo.IsRequired)
+                if (!memberships.TryGetValue(choiceGroupInfo.GroupId, out var groupMemberships))
                 {
-                    groupIds.Add(choiceGroupInfo.GroupId);
+                    groupMemberships = new List<(IPropertySymbol, ChoiceGroupInfo)>();
+                    memberships.Add(choiceGroupInfo.GroupId, groupMemberships);
                 }
+
+                groupMemberships.Add((property, choiceGroupInfo));
             }
         }
 
-        return groupIds;
+        return memberships
+            .Where(group => group.Value.Any(membership => membership.ChoiceGroup.IsRequired))
+            .OrderBy(group => group.Key)
+            .Select(group => new RequiredChoiceGroupInfo(
+                group.Key,
+                GetChoiceGroupInfos(group.Value[0].Property)
+                    .Where(parent => parent.GroupId != group.Key &&
+                        memberships[parent.GroupId].Count > group.Value.Count &&
+                        group.Value.All(member => GetChoiceGroupInfos(member.Property).Any(info =>
+                            info.GroupId == parent.GroupId && info.ArmId == parent.ArmId)))
+                    .ToImmutableArray(),
+                group.Value
+                    .OrderBy(membership => membership.ChoiceGroup.ArmId)
+                    .ThenBy(membership => membership.Property.Name, StringComparer.Ordinal)
+                    .Select(membership => membership.Property.Name)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToImmutableArray()))
+            .ToList();
     }
 
     private static IEnumerable<IPropertySymbol> GetPropertiesIncludingBaseTypes(ITypeSymbol type)
@@ -445,24 +498,38 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static HashSet<int> GetAssignedChoiceGroupIds(IObjectOrCollectionInitializerOperation initializer)
+    private static List<ChoiceGroupInfo> GetAssignedChoices(IObjectOrCollectionInitializerOperation initializer)
     {
-        var groupIds = new HashSet<int>();
+        var choices = new List<ChoiceGroupInfo>();
 
         foreach (var operation in initializer.Initializers)
         {
-            if (operation is ISimpleAssignmentOperation assignment &&
-                assignment.Target is IPropertyReferenceOperation propertyReference)
+            var property = operation switch
             {
-                foreach (var choiceGroupInfo in GetChoiceGroupInfos(propertyReference.Property))
-                {
-                    groupIds.Add(choiceGroupInfo.GroupId);
-                }
+                ISimpleAssignmentOperation { Target: IPropertyReferenceOperation reference } assignment
+                    when !IsOmittedNullAssignment(assignment, reference.Property) => reference.Property,
+                IMemberInitializerOperation { InitializedMember: IPropertyReferenceOperation reference } member
+                    when member.Initializer.Initializers.Length > 0 => reference.Property,
+                _ => null,
+            };
+
+            if (property != null)
+            {
+                choices.AddRange(GetChoiceGroupInfos(property));
             }
         }
 
-        return groupIds;
+        return choices;
     }
+
+    private static bool IsOmittedNullAssignment(ISimpleAssignmentOperation assignment, IPropertySymbol property) =>
+        property.Type.IsReferenceType &&
+        assignment.Value.ConstantValue.HasValue &&
+        assignment.Value.ConstantValue.Value == null &&
+        !property.GetAttributes().Any(attribute =>
+            attribute.AttributeClass?.ToDisplayString() is "System.Xml.Serialization.XmlElementAttribute" or
+                "System.Xml.Serialization.XmlArrayAttribute" &&
+            attribute.NamedArguments.Any(argument => argument.Key == "IsNullable" && argument.Value.Value is true));
 
     private static bool IsRequiredChoiceGroupAttribute(AttributeData attribute) =>
         attribute.NamedArguments.Any(argument =>
@@ -494,6 +561,20 @@ public sealed class XmlChoiceGroupAnalyzer : DiagnosticAnalyzer
         public int GroupId { get; }
         public int ArmId { get; }
         public bool IsRequired { get; }
+    }
+
+    private readonly struct RequiredChoiceGroupInfo
+    {
+        public RequiredChoiceGroupInfo(int groupId, ImmutableArray<ChoiceGroupInfo> parentChoices, ImmutableArray<string> propertyNames)
+        {
+            GroupId = groupId;
+            ParentChoices = parentChoices;
+            PropertyNames = propertyNames;
+        }
+
+        public int GroupId { get; }
+        public ImmutableArray<ChoiceGroupInfo> ParentChoices { get; }
+        public ImmutableArray<string> PropertyNames { get; }
     }
 
     /// <summary>

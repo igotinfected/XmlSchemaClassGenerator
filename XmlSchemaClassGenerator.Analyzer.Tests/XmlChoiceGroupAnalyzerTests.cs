@@ -86,8 +86,43 @@ public class Program
         var test = CreateTest(source,
             Verify.Diagnostic(XmlChoiceGroupAnalyzer.MissingRequiredChoiceGroupDiagnosticId)
                 .WithLocation(0)
-                .WithArguments("MyType", 1));
+                .WithArguments("MyType", 1, "'PropA', 'PropB'"));
 
+        // assert
+        await test.RunAsync();
+    }
+
+    [Theory]
+    [InlineData("Items = { \"item\" }", false)]
+    [InlineData("Items = { }", true)]
+    [InlineData("Child = { Value = \"item\" }", false)]
+    public async Task ObjectInitializer_MemberInitializerSelectsRequiredArmOnlyWhenPopulated(string initializer, bool expectsMissingChoice)
+    {
+        // arrange
+        var source = @"
+using TestModels;
+using System.Collections.Generic;
+public class ChildType
+{
+    public string? Value { get; set; }
+}
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0, IsRequired = true)]
+    public List<string> Items { get; } = new List<string>();
+    [XmlChoiceGroupAttribute(1, 1, IsRequired = true)]
+    public ChildType Child { get; set; } = new ChildType();
+}
+public class Program
+{
+    public void M() { var x = {|#0:new MyType { " + initializer + @" }|}; }
+}";
+        var test = expectsMissingChoice
+            ? CreateTest(source, Verify.Diagnostic(XmlChoiceGroupAnalyzer.MissingRequiredChoiceGroupDiagnosticId)
+                .WithLocation(0).WithArguments("MyType", 1, "'Items', 'Child'"))
+            : CreateTest(source);
+
+        // act
         // assert
         await test.RunAsync();
     }
@@ -164,7 +199,7 @@ public class Program
         var test = CreateTest(source,
             Verify.Diagnostic(XmlChoiceGroupAnalyzer.MissingRequiredChoiceGroupDiagnosticId)
                 .WithLocation(0)
-                .WithArguments("DerivedType", 1));
+                .WithArguments("DerivedType", 1, "'BaseA', 'BaseB'"));
 
         // assert
         await test.RunAsync();
@@ -256,7 +291,7 @@ public class Program
         var test = CreateTest(source,
             Verify.Diagnostic(XmlChoiceGroupAnalyzer.MissingRequiredChoiceGroupDiagnosticId)
                 .WithLocation(0)
-                .WithArguments("ParentType", 1));
+                .WithArguments("ParentType", 1, "'ParentA', 'ParentB'"));
 
         // assert
         await test.RunAsync();
@@ -366,7 +401,7 @@ public class Program
         var test = CreateTest(source,
             Verify.Diagnostic(XmlChoiceGroupAnalyzer.MissingRequiredChoiceGroupDiagnosticId)
                 .WithLocation(0)
-                .WithArguments("MyType", 1));
+                .WithArguments("MyType", 1, "'PropA', 'PropB'"));
 
         // assert
         await test.RunAsync();
@@ -1023,11 +1058,8 @@ public class Program
     }
 
     [Fact]
-    public async Task IfElse_DifferentArmsInDifferentBranches_NoConflictPerBranch_Reports()
+    public async Task IfElse_DifferentArmsInDifferentBranches_NoDiagnostic()
     {
-        // Each branch sets a DIFFERENT arm, but only one arm per branch.
-        // The may-analysis merges both into the post-if state, so at the method
-        // level we see both arms as potentially set.
         var source = @"
 using TestModels;
 
@@ -1047,21 +1079,17 @@ public class Program
         var x = new MyType();
         if (cond)
         {
-            {|#1:x.PropA = ""a""|};
+            x.PropA = ""a"";
         }
         else
         {
-            {|#0:x.PropB = ""b""|};
+            x.PropB = ""b"";
         }
     }
 }
 ";
 
-        var test = CreateTest(source,
-            Verify.Diagnostic(XmlChoiceGroupAnalyzer.DiagnosticId)
-                .WithLocation(0)
-                .WithLocation(1)
-                .WithArguments("PropB", "PropA", 1, 1, 0));
+        var test = CreateTest(source);
         await test.RunAsync();
     }
 
@@ -1143,6 +1171,178 @@ public class Program
     // =========================================================================
     // Edge case: empty method, no assignments
     // =========================================================================
+
+    [Theory]
+    [InlineData("var x = new MyType { PropA = null, PropB = \"b\" };")]
+    [InlineData("var x = new MyType { PropA = \"a\" }; x.PropA = null; x.PropB = \"b\";")]
+    public async Task NullOmittedByXmlSerializerDoesNotSelectAnArm(string statements)
+    {
+        // arrange
+        var source = @"
+using TestModels;
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0)]
+    public string? PropA { get; set; }
+    [XmlChoiceGroupAttribute(1, 1)]
+    public string? PropB { get; set; }
+}
+public class Program
+{
+    public void M() { " + statements + @" }
+}";
+        var test = CreateTest(source);
+
+        // act
+        // assert
+        await test.RunAsync();
+    }
+
+    [Fact]
+    public async Task NillableNullStillSelectsAnArm()
+    {
+        // arrange
+        var source = @"
+using TestModels;
+using System.Xml.Serialization;
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0)]
+    [XmlElement(IsNullable = true)]
+    public string? PropA { get; set; }
+    [XmlChoiceGroupAttribute(1, 1)]
+    public string? PropB { get; set; }
+}
+public class Program
+{
+    public void M()
+    {
+        var x = new MyType { {|#1:PropA = null|}, {|#0:PropB = ""b""|} };
+    }
+}";
+        var test = CreateTest(source,
+            Verify.Diagnostic(XmlChoiceGroupAnalyzer.DiagnosticId)
+                .WithLocation(0).WithLocation(1)
+                .WithArguments("PropB", "PropA", 1, 1, 0));
+
+        // act
+        // assert
+        await test.RunAsync();
+    }
+
+    [Fact]
+    public async Task NullDoesNotSatisfyRequiredNonNillableChoice()
+    {
+        // arrange
+        var source = @"
+using TestModels;
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0, IsRequired = true)]
+    public string? PropA { get; set; }
+    [XmlChoiceGroupAttribute(1, 1, IsRequired = true)]
+    public string? PropB { get; set; }
+}
+public class Program
+{
+    public void M() { var x = {|#0:new MyType { PropA = null }|}; }
+}";
+        var test = CreateTest(source,
+            Verify.Diagnostic(XmlChoiceGroupAnalyzer.MissingRequiredChoiceGroupDiagnosticId)
+                .WithLocation(0).WithArguments("MyType", 1, "'PropA', 'PropB'"));
+
+        // act
+        // assert
+        await test.RunAsync();
+    }
+
+    [Fact]
+    public async Task NestedRequiredChoiceIsNotRequiredWhenAnotherOuterArmIsSelected()
+    {
+        // arrange
+        var source = @"
+using TestModels;
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0, IsRequired = true)]
+    [XmlChoiceGroupAttribute(2, 0, IsRequired = true)]
+    public string? PropA { get; set; }
+    [XmlChoiceGroupAttribute(1, 0, IsRequired = true)]
+    [XmlChoiceGroupAttribute(2, 1, IsRequired = true)]
+    public string? PropB { get; set; }
+    [XmlChoiceGroupAttribute(1, 1, IsRequired = true)]
+    public string? PropC { get; set; }
+}
+public class Program
+{
+    public void M() { var x = new MyType { PropC = ""c"" }; }
+}";
+        var test = CreateTest(source);
+
+        // act
+        // assert
+        await test.RunAsync();
+    }
+
+    [Theory]
+    [InlineData("var x = new MyType { PropA = \"a\" }; x = new MyType { PropB = \"b\" };")]
+    [InlineData("var x = new MyType { PropA = \"a\" }; x = new MyType(); x.PropB = \"b\";")]
+    [InlineData("for (var i = 0; i < 2; i++) { var x = new MyType { PropA = \"a\" }; x.PropA = null; x.PropB = \"b\"; }")]
+    public async Task ReassignedLocalDoesNotRetainPreviousObjectChoice(string statements)
+    {
+        // arrange
+        var source = @"
+using TestModels;
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0)]
+    public string? PropA { get; set; }
+    [XmlChoiceGroupAttribute(1, 1)]
+    public string? PropB { get; set; }
+}
+public class Program
+{
+    public void M() { " + statements + @" }
+}";
+        var test = CreateTest(source);
+
+        // act
+        // assert
+        await test.RunAsync();
+    }
+
+    [Fact]
+    public async Task AssignmentAfterBranchJoinStillReportsPossibleConflict()
+    {
+        // arrange
+        var source = @"
+using TestModels;
+public class MyType
+{
+    [XmlChoiceGroupAttribute(1, 0)]
+    public string? PropA { get; set; }
+    [XmlChoiceGroupAttribute(1, 1)]
+    public string? PropB { get; set; }
+}
+public class Program
+{
+    public void M(bool condition)
+    {
+        var x = new MyType();
+        if (condition) { x.PropA = ""a""; }
+        else { {|#1:x.PropB = ""b""|}; }
+        {|#0:x.PropA = ""later""|};
+    }
+}";
+        var test = CreateTest(source,
+            Verify.Diagnostic(XmlChoiceGroupAnalyzer.DiagnosticId)
+                .WithLocation(0).WithLocation(1)
+                .WithArguments("PropA", "PropB", 1, 0, 1));
+
+        // act
+        // assert
+        await test.RunAsync();
+    }
 
     [Fact]
     public async Task EmptyMethod_NoDiagnostic()

@@ -33,6 +33,8 @@ public class ChoiceContext
     /// <summary>Whether all parent particles on the current path are required.</summary>
     public bool EffectiveIsRequired { get; private set; } = true;
 
+    public bool IsRepeated { get; private set; }
+
     /// <summary>
     /// Enter a new choice group (top-level choice, not nested).
     /// Returns a new context with the given group ID and arm counter starting at 0.
@@ -45,6 +47,7 @@ public class ChoiceContext
             Memberships = [.. Memberships, new ChoiceGroupMembership(groupId, 0, effectiveIsRequired)],
             IsDirectlyInsideChoice = true,
             EffectiveIsRequired = effectiveIsRequired,
+            IsRepeated = IsRepeated,
         };
     }
 
@@ -53,7 +56,7 @@ public class ChoiceContext
     /// entered a non-choice compositor (sequence/all/group ref). This prevents nested
     /// choices from being flattened into the outer group.
     /// </summary>
-    public ChoiceContext EnterNonChoiceCompositor(bool isRequired)
+    public ChoiceContext EnterNonChoiceCompositor(bool isRequired, bool isRepeated = false)
     {
         var effectiveIsRequired = EffectiveIsRequired && isRequired;
         return new ChoiceContext
@@ -61,6 +64,7 @@ public class ChoiceContext
             Memberships = [.. Memberships.Select(m => new ChoiceGroupMembership(m.GroupId, m.ArmId, m.IsRequired && effectiveIsRequired))],
             IsDirectlyInsideChoice = false,
             EffectiveIsRequired = effectiveIsRequired,
+            IsRepeated = IsRepeated || isRepeated,
         };
     }
 

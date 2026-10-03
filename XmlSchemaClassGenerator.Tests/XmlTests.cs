@@ -64,6 +64,7 @@ public class XmlTests(ITestOutputHelper output)
             EnableNullableReferenceAttributes = generatorPrototype.EnableNullableReferenceAttributes,
             EnableNullableDirective = generatorPrototype.EnableNullableDirective,
             GenerateRequiredModifier = generatorPrototype.GenerateRequiredModifier,
+            GenerateDefaultValueAttribute = generatorPrototype.GenerateDefaultValueAttribute,
             GenerateChoiceGroupAttributes = generatorPrototype.GenerateChoiceGroupAttributes,
             GenerateStrictFixedValues = generatorPrototype.GenerateStrictFixedValues,
             GenerateStrictRangeBounds = generatorPrototype.GenerateStrictRangeBounds,
@@ -4510,7 +4511,17 @@ namespace Test
         </xs:sequence>
     </xs:complexType>
 
-    <!-- Case 11: No choice (control — should have no attributes) -->
+    <!-- Case 11: Required choice with entirely optional arms is emptiable -->
+    <xs:complexType name=""EmptiableChoice"">
+        <xs:sequence>
+            <xs:choice>
+                <xs:element name=""OptionalFirst"" type=""xs:string"" minOccurs=""0""/>
+                <xs:element name=""OptionalSecond"" type=""xs:string"" minOccurs=""0""/>
+            </xs:choice>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Case 12: No choice (control — should have no attributes) -->
     <xs:complexType name=""NoChoice"">
         <xs:sequence>
             <xs:element name=""Foo"" type=""xs:string""/>
@@ -4753,6 +4764,22 @@ namespace Test
     }
 
     [Fact]
+    public void TestChoiceGroupRequiredMetadataReflectsEmptiableArms()
+    {
+        // arrange
+        var generator = CreateChoiceGroupGenerator();
+
+        // act
+        var contents = ConvertXml(nameof(TestChoiceGroupRequiredMetadataReflectsEmptiableArms), ChoiceGroupXsd, generator);
+        var content = string.Join("\n", contents);
+
+        // assert
+        var block = ExtractClassBlock(content, "EmptiableChoice");
+        Assert.All(GetChoiceGroupAttributesForProperty(block, "OptionalFirst"), attribute => Assert.False(attribute.IsRequired));
+        Assert.All(GetChoiceGroupAttributesForProperty(block, "OptionalSecond"), attribute => Assert.False(attribute.IsRequired));
+    }
+
+    [Fact]
     public void TestChoiceGroupRequiredMetadataPreservesOptionalityThroughGroupRef()
     {
         // arrange
@@ -4783,6 +4810,63 @@ namespace Test
         // assert
         Assert.All(groupRefContext.Memberships, membership => Assert.False(membership.IsRequired));
         Assert.All(nestedChoiceContext.Memberships, membership => Assert.False(membership.IsRequired));
+    }
+
+    [Theory]
+    [InlineData("<xs:choice maxOccurs='unbounded'><xs:element name='Alpha' type='xs:string'/><xs:element name='Beta' type='xs:string'/></xs:choice>")]
+    [InlineData("<xs:sequence maxOccurs='unbounded'><xs:choice><xs:element name='Alpha' type='xs:string'/><xs:element name='Beta' type='xs:string'/></xs:choice></xs:sequence>")]
+    [InlineData("<xs:sequence><xs:group ref='Alternatives' maxOccurs='unbounded'/></xs:sequence>")]
+    public void TestRepeatedChoicesDoNotMarkAlternativesAsExclusive(string particle)
+    {
+        // arrange
+        var schema = $"<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'><xs:group name='Alternatives'><xs:choice><xs:element name='Alpha' type='xs:string'/><xs:element name='Beta' type='xs:string'/></xs:choice></xs:group><xs:complexType name='Repeated'>{particle}</xs:complexType></xs:schema>";
+        var generator = CreateChoiceGroupGenerator();
+
+        // act
+        var content = string.Join("\n", ConvertXml(nameof(TestRepeatedChoicesDoNotMarkAlternativesAsExclusive), schema, generator));
+        var block = ExtractClassBlock(content, "Repeated");
+
+        // assert
+        Assert.DoesNotContain("XmlChoiceGroupAttribute(", block);
+    }
+
+    [Fact]
+    public void TestRepeatedNestedChoicePreservesOuterExclusivity()
+    {
+        // arrange
+        var schema = "<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'><xs:complexType name='Outer'><xs:choice><xs:choice maxOccurs='unbounded'><xs:element name='Alpha' type='xs:string'/><xs:element name='Beta' type='xs:string'/></xs:choice><xs:element name='Gamma' type='xs:string'/></xs:choice></xs:complexType></xs:schema>";
+        var generator = CreateChoiceGroupGenerator();
+        generator.CollectionSettersMode = CollectionSettersMode.Public;
+
+        // act
+        var content = string.Join("\n", ConvertXml(nameof(TestRepeatedNestedChoicePreservesOuterExclusivity), schema, generator));
+        var block = ExtractClassBlock(content, "Outer");
+        var alpha = Assert.Single(GetChoiceGroupAttributesForProperty(block, "Alpha"));
+        var beta = Assert.Single(GetChoiceGroupAttributesForProperty(block, "Beta"));
+        var gamma = Assert.Single(GetChoiceGroupAttributesForProperty(block, "Gamma"));
+
+        // assert
+        Assert.Equal(alpha, beta);
+        Assert.Equal(alpha.GroupId, gamma.GroupId);
+        Assert.NotEqual(alpha.ArmId, gamma.ArmId);
+    }
+
+    [Fact]
+    public void TestRepeatedElementKeepsChoiceExclusiveWithinEachObject()
+    {
+        // arrange
+        var schema = "<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'><xs:complexType name='Outer'><xs:sequence><xs:element name='Item' type='Item' maxOccurs='unbounded'/></xs:sequence></xs:complexType><xs:complexType name='Item'><xs:choice><xs:element name='Alpha' type='xs:string'/><xs:element name='Beta' type='xs:string'/></xs:choice></xs:complexType></xs:schema>";
+        var generator = CreateChoiceGroupGenerator();
+
+        // act
+        var content = string.Join("\n", ConvertXml(nameof(TestRepeatedElementKeepsChoiceExclusiveWithinEachObject), schema, generator));
+        var block = ExtractClassBlock(content, "Item");
+        var alpha = Assert.Single(GetChoiceGroupAttributesForProperty(block, "Alpha"));
+        var beta = Assert.Single(GetChoiceGroupAttributesForProperty(block, "Beta"));
+
+        // assert
+        Assert.Equal(alpha.GroupId, beta.GroupId);
+        Assert.NotEqual(alpha.ArmId, beta.ArmId);
     }
 
     [Fact]
@@ -4824,11 +4908,12 @@ namespace Test
 
     private static List<(int GroupId, int ArmId, bool IsRequired)> GetChoiceGroupAttributesForProperty(string classBlock, string propertyName)
     {
-        var propertyIndex = classBlock.IndexOf($" {propertyName} ", StringComparison.Ordinal);
-        Assert.True(propertyIndex >= 0, $"Could not find property {propertyName}.");
+        var declaration = Regex.Match(classBlock, $@"public[^\r\n]*\s{Regex.Escape(propertyName)}(?=\s|$)");
+        Assert.True(declaration.Success, $"Could not find property {propertyName}.");
+        var propertyIndex = declaration.Index;
 
-        var previousPropertyIndex = classBlock.LastIndexOf(" { get; set; }", propertyIndex, StringComparison.Ordinal);
-        var searchStart = previousPropertyIndex < 0 ? 0 : previousPropertyIndex + " { get; set; }".Length;
+        var previousPropertyIndex = classBlock.LastIndexOf("}", propertyIndex, StringComparison.Ordinal);
+        var searchStart = previousPropertyIndex + 1;
         var attributeBlock = classBlock[searchStart..propertyIndex];
         var matches = Regex.Matches(attributeBlock, @"XmlChoiceGroupAttribute\((\d+), (\d+), IsRequired=(true|false)\)");
 
@@ -5195,7 +5280,7 @@ namespace Test
         Assert.Equal("999", range.Maximum?.ToString());
     }
 
-    // -- DefaultValueAttribute suppression for nullable reference types ----------------
+    // -- DefaultValueAttribute suppression ----------------
 
     private const string DefaultValueNullableXsd = @"<?xml version=""1.0"" encoding=""UTF-8""?>
 <xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" elementFormDefault=""qualified"">
@@ -5203,6 +5288,7 @@ namespace Test
         <xs:sequence>
             <xs:element name=""OptionalStringWithDefault"" type=""xs:string"" minOccurs=""0"" default=""hello""/>
             <xs:element name=""OptionalIntWithDefault"" type=""xs:int"" minOccurs=""0"" default=""42""/>
+            <xs:element name=""OptionalBoolWithDefault"" type=""xs:boolean"" minOccurs=""0"" default=""true""/>
             <xs:element name=""RequiredStringWithDefault"" type=""xs:string"" default=""world""/>
         </xs:sequence>
     </xs:complexType>
@@ -5255,6 +5341,34 @@ namespace Test
         var content = string.Join("\n", contents);
 
         Assert.Contains("DefaultValueAttribute(42)", content);
+    }
+
+    [Fact]
+    public void TestDefaultValueAttributeCanBeSuppressedForExplicitDefaultSerialization()
+    {
+        // arrange
+        var generator = new Generator
+        {
+            NamespaceProvider = new NamespaceProvider { GenerateNamespace = key => "Test" },
+            EnableNullableDirective = false,
+            GenerateNullables = true,
+            GenerateDefaultValueAttribute = false,
+        };
+        var contents = ConvertXml(nameof(TestDefaultValueAttributeCanBeSuppressedForExplicitDefaultSerialization), DefaultValueNullableXsd, generator).ToArray();
+        var assembly = Compiler.Compile(nameof(TestDefaultValueAttributeCanBeSuppressedForExplicitDefaultSerialization), contents);
+        var rootType = assembly.GetType("Test.DefaultValueRoot");
+        var property = rootType.GetProperty("OptionalBoolWithDefault");
+        var value = Activator.CreateInstance(rootType);
+        property.SetValue(value, true);
+        var serializer = new XmlSerializer(rootType);
+
+        // act
+        using var writer = new StringWriter();
+        serializer.Serialize(writer, value);
+
+        // assert
+        Assert.Empty(property.GetCustomAttributes(typeof(System.ComponentModel.DefaultValueAttribute), false));
+        Assert.Contains("<OptionalBoolWithDefault>true</OptionalBoolWithDefault>", writer.ToString());
     }
 
     [Fact]
